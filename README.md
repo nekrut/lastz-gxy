@@ -1,0 +1,159 @@
+# lastz-gxy
+
+A Rust reimplementation of [LASTZ](https://github.com/lastz/lastz) focused on
+**throughput on commodity multi-core CPUs** while preserving upstream
+sensitivity. Algorithmic choices (seed patterns, HSP extension, chaining,
+3-state affine gapped DP, interpolation) are carried over unchanged; the speed
+comes from parallelism, cache-friendly data structures, and SIMD on the
+hot-path, not from relaxing the alignment model.
+
+> Status: **proposal / scaffolding**. See [PLAN.md](PLAN.md) for the phased
+> roadmap and parity gate.
+
+## Why another lastz?
+
+UCSC/Harris lastz remains the reference for pairwise mammalian-scale
+alignment, but in 2026 the upstream code is:
+
+1. **Single-threaded.** Pipelines rely on external splitters (`run_lastz.py`,
+   Galaxy's `lastz_wrapper`, Snakemake shards) to saturate cores. Intra-process
+   parallelism across query chunks, targets, or DP cells does not exist.
+2. **Scalar.** The 3-state affine gapped extension and ungapped x-drop loops
+   are portable C with no SIMD. Modern AVX2/AVX-512/NEON implementations
+   (KSW2, WFA2, block-aligner) are 4–10× faster on the same recurrence.
+3. **Monolithic.** One binary handles FASTA/2bit/HSX parsing, masking,
+   seeding, HSP, chaining, DP, and eight output formats in ~50 kLOC of C with
+   a hand-rolled build. Static binaries and reproducible builds are difficult.
+4. **GPU variants are disjoint.** [SegAlign](https://github.com/gsneha26/SegAlign)
+   and [KegAlign](https://github.com/gsneha26/KegAlign) are separate forks
+   that diverge on output semantics and require CUDA. There is no CPU
+   implementation that simply uses all the cores a workstation already has.
+
+`lastz-gxy` targets the gap between upstream lastz (1 core, portable) and
+SegAlign (GPU, niche): a **single static Rust binary that matches lastz output
+within a parity gate, on any x86_64/arm64 machine, using every core**.
+
+## Non-goals
+
+- **GPU acceleration.** SegAlign/KegAlign already cover that regime.
+- **New alignment algorithms.** Seed, HSP, chain, anchor, align, interp all
+  match upstream. No WFA substitution in v1; banded SIMD DP is bolted onto the
+  existing recurrence.
+- **Quantum DNA (probabilistic seeds).** Rarely used; deferred behind a
+  feature flag.
+- **LAV/GFA/HSX writers in v1.** MAF, AXT, SAM, and PAF cover ~all modern
+  pipelines; the others are straightforward to add later.
+- **Drop-in replacement for every lastz flag.** CLI-compatible for common
+  flags (`--format`, `--step`, `--seed`, `--notransition`, `--xdrop`,
+  `--ydrop`, `--gappedthresh`, `--hspthresh`, `--chain`, `--masking`,
+  `--ambiguous`, `--strand`, `--scores`). Long-tail flags tracked in PLAN.md.
+
+## Parity guarantee (target)
+
+Release gate for v1:
+
+| Metric                                         | Threshold        |
+|------------------------------------------------|------------------|
+| Aligned-block Jaccard vs upstream (per chrom)  | ≥ 0.99           |
+| Per-block score delta (median)                 | 0                |
+| Per-block score delta (max, outside tie zone)  | ≤ 1              |
+| Total aligned bp delta                         | ≤ 0.1 %          |
+| Identity distribution KS-statistic             | ≤ 0.01           |
+
+The 1% Jaccard slack absorbs tie-breaking in seed ordering, diagonal-hash
+eviction, and DP traceback — not sensitivity loss. See
+[PLAN.md §Parity testing](PLAN.md#parity-testing) for the four-tier harness.
+
+## Performance target
+
+On a 32-core workstation (Zen 4, AVX-512), for `human chr1 vs mouse chr1`
+with `--step=20 --notransition --format=maf`:
+
+| Implementation           | Wall time  | Speedup |
+|--------------------------|-----------:|--------:|
+| upstream lastz 1.04.52   | baseline   |   1.0×  |
+| lastz-gxy (32 threads)   | target     | 20–30×  |
+
+Target reflects near-linear scaling across the seeding and HSP stages (the
+current single-thread bottleneck per `perf record` on upstream) plus 2–3× on
+gapped DP from SIMD. Hard numbers published once the MVP lands; see
+`benches/` for reproducible micro-benchmarks.
+
+## Architecture sketch
+
+```
+lastz-gxy/
+├── src/
+│   ├── cli.rs            - clap CLI, upstream flag compatibility layer
+│   ├── sequences.rs      - FASTA / 2bit / HSX loader (noodles + mmap)
+│   ├── masking.rs        - soft/hard masking, dynamic masking
+│   ├── scoring.rs        - HOXD70 / user matrices, --inferscores
+│   ├── seeds.rs          - spaced-seed patterns (12-of-19, 19-of-20, twin)
+│   ├── pos_table.rs      - bucketed seed->positions index (SoA, radix)
+│   ├── seed_search.rs    - query-side seed iteration, transition handling
+│   ├── diag_hash.rs      - lock-free diagonal hash for hit dedup
+│   ├── hsp.rs            - ungapped x-drop extension (SIMD inner loop)
+│   ├── chain.rs          - HSP chaining (lastz-style, not minimap2)
+│   ├── anchor.rs         - sliding-window midpoint anchor selection
+│   ├── gapped_extend.rs  - 3-state affine DP, banded + SIMD lanes
+│   ├── tweener.rs        - inter-alignment interpolation stage
+│   ├── output/
+│   │   ├── maf.rs        - streaming MAF writer
+│   │   ├── axt.rs
+│   │   ├── sam.rs
+│   │   └── paf.rs
+│   ├── driver.rs         - pipeline: target-sharded rayon scheduler
+│   └── bin/
+│       └── gxy-compare.rs - MAF/AXT concordance tool for parity gate
+├── benches/              - criterion microbenchmarks (hot path)
+├── parity/
+│   ├── fixtures/         - small FASTAs + golden MAFs from upstream
+│   └── compare/          - release-gate harness
+├── scripts/
+│   ├── build-upstream.sh - pins lastz v1.04.52 as ground truth
+│   └── compare.sh        - runs both, diffs with gxy-compare
+├── Cargo.toml
+├── PLAN.md
+└── README.md
+```
+
+## Performance levers
+
+| Lever                                              | Expected gain | Phase |
+|----------------------------------------------------|--------------:|------:|
+| Rayon work-stealing across (target × strand) pairs |        5–10×  |    1  |
+| Within-target chunking with halo-joined HSPs       |        2–4×   |    2  |
+| SoA `pos_table` with radix-bucketed seed hash      |        1.5–2× |    1  |
+| SIMD ungapped x-drop (AVX2/NEON)                   |        2–3×   |    2  |
+| Banded SIMD 3-state affine DP (KSW2-style lanes)   |        3–5×   |    3  |
+| Lock-free diagonal hash (per-shard, epoch-reclaim) |        1.3×   |    2  |
+| `mmap` 2bit/HSX reference; zero-copy query slice   |        1.2×   |    1  |
+| Streaming MAF/AXT writer, bounded channel          |     I/O-bound |    1  |
+| Minimizer prefilter for `--step ≥ 10` seeds        |        1.5×   |    4  |
+
+Multiplicative gains do not compose linearly; the 20–30× target is a
+conservative estimate based on profiling upstream on a 16 Mbp vs 16 Mbp pair
+where seeding + HSP is ~70 % of wall time and gapped DP ~25 %.
+
+## Dependencies
+
+- [`noodles`](https://github.com/zaeleus/noodles) — FASTA, SAM, BAM
+- [`rayon`](https://github.com/rayon-rs/rayon) — work-stealing thread pool
+- [`clap`](https://github.com/clap-rs/clap) — CLI
+- [`memmap2`](https://github.com/RazrFalcon/memmap2) — reference mmap
+- [`criterion`](https://github.com/bheisler/criterion.rs) — benchmarks
+- [`insta`](https://github.com/mitsuhiko/insta) — snapshot tests
+
+No C dependencies. `cargo build --release` produces a single static binary.
+
+## License
+
+MIT. Same as the `lofreq-gxy` sibling project.
+
+## Related work
+
+- [lastz/lastz](https://github.com/lastz/lastz) — upstream, C, single-thread
+- [SegAlign](https://github.com/gsneha26/SegAlign) — GPU port of lastz seeding/HSP
+- [KegAlign](https://github.com/gsneha26/KegAlign) — SegAlign successor, MAF output
+- [minimap2](https://github.com/lh3/minimap2) — different niche (long reads, not mammalian WGA)
+- [nekrut/lofreq-gxy](https://github.com/nekrut/lofreq-gxy) — sibling project, same rewrite philosophy
