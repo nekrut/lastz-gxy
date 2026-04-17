@@ -19,6 +19,7 @@ pub mod driver;
 pub mod edit_script;
 pub mod gapped_extend;
 pub mod hsp;
+mod hsp_simd;
 pub mod output;
 pub mod pos_table;
 pub mod scoring;

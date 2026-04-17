@@ -72,6 +72,38 @@ pub fn extend_hit(
     q_pos: u32,
     seed_len: u32,
 ) -> Option<Hsp> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if matrix.is_i8_safe() && has_avx2() {
+            // Safety: AVX2 available at runtime, matrix i8-safe.
+            return unsafe {
+                crate::hsp_simd::extend_hit_avx2(
+                    target, query, matrix, params, t_pos, q_pos, seed_len,
+                )
+            };
+        }
+    }
+    extend_hit_scalar(target, query, matrix, params, t_pos, q_pos, seed_len)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn has_avx2() -> bool {
+    use std::sync::OnceLock;
+    static HAS: OnceLock<bool> = OnceLock::new();
+    *HAS.get_or_init(|| std::is_x86_feature_detected!("avx2"))
+}
+
+/// Scalar reference implementation; exposed via `extend_hit` but also used
+/// directly in tests and by the SIMD path's proptest oracle.
+pub fn extend_hit_scalar(
+    target: &PackedSeq,
+    query: &PackedSeq,
+    matrix: &ScoringMatrix,
+    params: &HspParams,
+    t_pos: u32,
+    q_pos: u32,
+    seed_len: u32,
+) -> Option<Hsp> {
     let t_pos = t_pos as i64;
     let q_pos = q_pos as i64;
     let t_len = target.len() as i64;
@@ -115,9 +147,9 @@ pub fn extend_hit(
     })
 }
 
-struct SideResult {
-    best_score: i32,
-    best_extent: u32,
+pub(crate) struct SideResult {
+    pub(crate) best_score: i32,
+    pub(crate) best_extent: u32,
 }
 
 /// Walk one side of the diagonal, updating the running score column by
@@ -181,6 +213,7 @@ fn column_score(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn m() -> ScoringMatrix {
         ScoringMatrix::hoxd70()
@@ -241,6 +274,43 @@ mod tests {
     fn hsp_diagonal_is_t_minus_q() {
         let h = Hsp { t_start: 100, q_start: 40, length: 10, score: 0 };
         assert_eq!(h.diagonal(), 60);
+    }
+
+    /// Differential test: AVX2 SIMD path must return the same HSP as the
+    /// scalar reference for any combination of random sequences, seed
+    /// position, and x-drop parameters. Runs the SIMD path directly; on
+    /// non-x86_64 targets this is a no-op.
+    #[cfg(target_arch = "x86_64")]
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 200, .. ProptestConfig::default() })]
+        #[test]
+        fn simd_matches_scalar(
+            target_bytes in proptest::collection::vec(prop::sample::select(&b"ACGTN"[..]), 32..200),
+            query_bytes in proptest::collection::vec(prop::sample::select(&b"ACGTN"[..]), 32..200),
+            seed_len in 4u32..12,
+            x_drop in 50i32..2000,
+        ) {
+            // Skip the test if AVX2 isn't available on this host.
+            if !std::is_x86_feature_detected!("avx2") { return Ok(()); }
+
+            let t = PackedSeq::from_ascii(&target_bytes);
+            let q = PackedSeq::from_ascii(&query_bytes);
+            let matrix = ScoringMatrix::hoxd70();
+            let params = HspParams { x_drop, hsp_threshold: 0 };
+
+            // Pick a seed position that's fully in-range.
+            let t_max = t.len().saturating_sub(seed_len as usize) as u32;
+            let q_max = q.len().saturating_sub(seed_len as usize) as u32;
+            if t_max == 0 || q_max == 0 { return Ok(()); }
+            let t_pos = t_max / 2;
+            let q_pos = q_max / 2;
+
+            let scalar = extend_hit_scalar(&t, &q, &matrix, &params, t_pos, q_pos, seed_len);
+            let simd = unsafe {
+                crate::hsp_simd::extend_hit_avx2(&t, &q, &matrix, &params, t_pos, q_pos, seed_len)
+            };
+            prop_assert_eq!(scalar, simd);
+        }
     }
 
     #[test]

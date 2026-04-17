@@ -9,9 +9,10 @@ the speed comes from parallelism, cache-friendly data structures, SIMD on the
 CPU hot-path, and a portable GPU compute path for seed+HSP — not from relaxing
 the alignment model.
 
-> Status: **Phase 2 complete + tweener + SAM + benchmarks** — scalar
-> threaded seed → HSP → chain → anchor → gapped 3-state affine DP →
-> tweener → MAF/PAF/SAM output. See [PLAN.md](PLAN.md) for the phased
+> Status: **Phase 3 in progress** — AVX2 SIMD HSP x-drop landed with a
+> proptest-enforced bit-exact parity gate against the scalar reference.
+> Full pipeline: seed → HSP (SIMD) → chain → anchor → gapped 3-state affine
+> DP → tweener → MAF/PAF/SAM output. See [PLAN.md](PLAN.md) for the phased
 > roadmap and parity gate.
 
 ## Quickstart

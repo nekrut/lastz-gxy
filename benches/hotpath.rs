@@ -10,7 +10,7 @@ use lastz_gxy::anchor::choose_anchor;
 use lastz_gxy::chain::best_chain;
 use lastz_gxy::edit_script::{EditOp, EditScript};
 use lastz_gxy::gapped_extend::{extend as gapped_extend, GappedParams};
-use lastz_gxy::hsp::{extend_hit, Hsp, HspParams};
+use lastz_gxy::hsp::{extend_hit, extend_hit_scalar, Hsp, HspParams};
 use lastz_gxy::output::{maf::MafWriter, paf::PafWriter, Record, Strand};
 use lastz_gxy::pos_table::PosTable;
 use lastz_gxy::scoring::ScoringMatrix;
@@ -64,24 +64,47 @@ fn bench_seed_search(c: &mut Criterion) {
 }
 
 fn bench_hsp_extend(c: &mut Criterion) {
-    let target = PackedSeq::from_ascii(&synthetic_dna(10_000, 1));
-    let query = PackedSeq::from_ascii(&synthetic_dna(10_000, 2));
+    // Sequences with a planted homologous run so the extender actually
+    // runs a non-trivial number of columns before x-drop.
+    let payload = synthetic_dna(2_000, 42);
+    let mut target = synthetic_dna(4_000, 1);
+    let mut query = synthetic_dna(4_000, 2);
+    target.splice(1_000..1_000, payload.iter().copied());
+    query.splice(1_000..1_000, payload.iter().copied());
+    let target = PackedSeq::from_ascii(&target);
+    let query = PackedSeq::from_ascii(&query);
     let matrix = ScoringMatrix::hoxd70();
     let params = HspParams { x_drop: 910, hsp_threshold: 0 };
-    c.bench_function("hsp/extend_hit/10kbp", |b| {
+    let mut grp = c.benchmark_group("hsp/extend_hit");
+    grp.bench_function("dispatch", |b| {
         b.iter(|| {
             let h = extend_hit(
                 black_box(&target),
                 black_box(&query),
                 black_box(&matrix),
                 black_box(&params),
-                100,
-                100,
+                1_000,
+                1_000,
                 12,
             );
             black_box(h);
         })
     });
+    grp.bench_function("scalar", |b| {
+        b.iter(|| {
+            let h = extend_hit_scalar(
+                black_box(&target),
+                black_box(&query),
+                black_box(&matrix),
+                black_box(&params),
+                1_000,
+                1_000,
+                12,
+            );
+            black_box(h);
+        })
+    });
+    grp.finish();
 }
 
 fn bench_gapped_extend(c: &mut Criterion) {

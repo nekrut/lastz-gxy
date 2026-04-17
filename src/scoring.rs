@@ -88,6 +88,30 @@ impl ScoringMatrix {
         *self.sub.iter().flatten().min().unwrap()
     }
 
+    /// True iff every substitution score and the ambiguous-score fall
+    /// inside `i8` range (`-128..=127`). The SIMD HSP extender needs this
+    /// to safely pack the 4×4 matrix into a single `__m128i` lookup table.
+    pub fn is_i8_safe(&self) -> bool {
+        let in_range = |v: i32| v >= i8::MIN as i32 && v <= i8::MAX as i32;
+        self.sub.iter().flatten().all(|&v| in_range(v)) && in_range(self.ambig_score)
+    }
+
+    /// Pack the 4×4 substitution matrix as a `[u8; 16]` lookup table indexed
+    /// by `(ref_code << 2) | query_code`. Bytes are `i8`-encoded in a `u8`
+    /// cast (lossless because the values are already in `i8` range — see
+    /// [`is_i8_safe`]).
+    pub fn pack_i8_lut(&self) -> [u8; 16] {
+        debug_assert!(self.is_i8_safe(), "matrix is not i8-safe");
+        let mut lut = [0u8; 16];
+        for t in 0..4u8 {
+            for q in 0..4u8 {
+                let idx = ((t << 2) | q) as usize;
+                lut[idx] = (self.sub[t as usize][q as usize] as i8) as u8;
+            }
+        }
+        lut
+    }
+
     /// Parse a lastz-style `--scores` file. The format is a leading header
     /// line of column bases followed by one row per base:
     ///
@@ -233,6 +257,29 @@ pub enum ScoringParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hoxd70_is_i8_safe_and_packs_correctly() {
+        let m = ScoringMatrix::hoxd70();
+        assert!(m.is_i8_safe());
+        let lut = m.pack_i8_lut();
+        assert_eq!(lut[(0 << 2) | 0] as i8, 91);
+        assert_eq!(lut[(1 << 2) | 1] as i8, 100);
+        assert_eq!(lut[(0 << 2) | 3] as i8, -123);
+        assert_eq!(lut[(1 << 2) | 2] as i8, -125);
+    }
+
+    #[test]
+    fn oversized_matrix_is_not_i8_safe() {
+        let text = "\
+                A    C    G    T\n\
+            A   200 -114  -31 -123\n\
+            C  -114  100 -125  -31\n\
+            G   -31 -125  100 -114\n\
+            T  -123  -31 -114   91\n";
+        let m = ScoringMatrix::from_lastz_text(text).unwrap();
+        assert!(!m.is_i8_safe());
+    }
 
     #[test]
     fn hoxd70_diagonal_matches_upstream() {
