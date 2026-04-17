@@ -6,6 +6,7 @@
 
 pub mod maf;
 pub mod paf;
+pub mod sam;
 
 use crate::edit_script::EditScript;
 

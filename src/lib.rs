@@ -25,3 +25,4 @@ pub mod scoring;
 pub mod seed_search;
 pub mod seeds;
 pub mod sequences;
+pub mod tweener;

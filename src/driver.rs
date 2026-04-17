@@ -26,6 +26,7 @@ use crate::scoring::ScoringMatrix;
 use crate::seed_search::{search, SearchParams};
 use crate::seeds::SeedPattern;
 use crate::sequences::Sequence;
+use crate::tweener::{interpolate, TweenerConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrandSpec {
@@ -64,6 +65,10 @@ pub struct Config {
     pub chain_enabled: bool,
     /// Sliding window width for anchor selection inside each HSP.
     pub anchor_window: u32,
+    /// Inter-alignment interpolation (upstream `tweener.c`). When `Some`,
+    /// runs after chaining on each `(target, query, strand)` triple with
+    /// the supplied tweener parameters.
+    pub tweener: Option<TweenerConfig>,
 }
 
 impl Default for Config {
@@ -79,6 +84,7 @@ impl Default for Config {
             gapped_enabled: true,
             chain_enabled: false,
             anchor_window: 31,
+            tweener: None,
         }
     }
 }
@@ -152,6 +158,23 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                         recs.push(r);
                     }
                 }
+
+                let recs = if let Some(tween_cfg) = &config.tweener {
+                    interpolate(
+                        recs,
+                        target,
+                        &target_ascii,
+                        query,
+                        qseq,
+                        qascii,
+                        strand,
+                        &config.matrix,
+                        config,
+                        tween_cfg,
+                    )
+                } else {
+                    recs
+                };
 
                 if !recs.is_empty() {
                     per_group.lock().unwrap().push((ti, qi, strand, recs));

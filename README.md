@@ -9,9 +9,10 @@ the speed comes from parallelism, cache-friendly data structures, SIMD on the
 CPU hot-path, and a portable GPU compute path for seed+HSP — not from relaxing
 the alignment model.
 
-> Status: **Phase 2 landed** — scalar threaded pipeline with seed → HSP →
-> chain → anchor → gapped 3-state affine DP → MAF/PAF output. See
-> [PLAN.md](PLAN.md) for the phased roadmap and parity gate.
+> Status: **Phase 2 complete + tweener + SAM + benchmarks** — scalar
+> threaded seed → HSP → chain → anchor → gapped 3-state affine DP →
+> tweener → MAF/PAF/SAM output. See [PLAN.md](PLAN.md) for the phased
+> roadmap and parity gate.
 
 ## Quickstart
 
@@ -22,17 +23,38 @@ cargo build --release
 ./target/release/lastz-gxy target.fa query.fa \
     --seed 12of19 --hspthresh 3000 --gappedthresh 3000 --format maf
 
-# Fast HSP-only pass, PAF output:
-./target/release/lastz-gxy target.fa query.fa \
-    --seed match12 --nogapped --format paf
+# SAM output (headers + CIGAR + NM/AS tags):
+./target/release/lastz-gxy target.fa query.fa --format sam
 
-# With chaining, on minus strand only:
-./target/release/lastz-gxy target.fa query.fa --chain --strand minus
+# Full sensitivity pipeline: chain + tweener interpolation + PAF:
+./target/release/lastz-gxy target.fa query.fa \
+    --chain --inner --inner-seed match12 --format paf
+
+# Fast HSP-only pass:
+./target/release/lastz-gxy target.fa query.fa --seed match12 --nogapped
 ```
 
+## Benchmarks
+
+Reproducible micro-benchmarks via `cargo bench` (criterion). Current
+single-thread baselines on a commodity x86_64 box:
+
+| Stage                                 | Input                      | Time   |
+|---------------------------------------|----------------------------|-------:|
+| `pos_table` build                     | 1 Mbp, 12of19              | ~TBD   |
+| `seed_search` (HSP ungapped)          | 1 Mbp × 100 kbp, match12   | ~9 ms  |
+| `hsp::extend_hit`                     | per hit, 10 kbp box        | ~238 ns|
+| `gapped_extend` (with 2 indels)       | 2 kbp                      | ~40 ms |
+| `chain::best_chain`                   | 200 HSPs                   | ~15 µs |
+| `maf::write_record`                   | 450-col block              | ~1.3 µs|
+| `paf::write_record`                   | 450-col block              | ~1.0 µs|
+
+These are the reference numbers Phase 3 SIMD and Phase 2.5 GPU work will
+report speedups against.
+
 Still to come (Phase 3+): SIMD ungapped x-drop, striped-vector gapped DP,
-`wgpu` GPU backend, 2bit/HSX readers, SAM output, tweener interpolation.
-`cargo test` exercises 82+ unit tests and an end-to-end integration fixture.
+`wgpu` GPU backend, 2bit/HSX readers, within-target chunking.
+`cargo test` exercises 90 unit tests and 1 end-to-end integration fixture.
 
 ## Why another lastz?
 

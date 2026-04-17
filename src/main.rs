@@ -5,7 +5,7 @@ use clap::Parser;
 
 use lastz_gxy::cli::{build_config, Cli, Format};
 use lastz_gxy::driver::run;
-use lastz_gxy::output::{maf::MafWriter, paf::PafWriter};
+use lastz_gxy::output::{maf::MafWriter, paf::PafWriter, sam::SamWriter};
 use lastz_gxy::sequences::load_fasta;
 
 fn main() -> anyhow::Result<()> {
@@ -40,6 +40,17 @@ fn main() -> anyhow::Result<()> {
         }
         Format::Paf => {
             let mut w = PafWriter::new(out);
+            for rec in &records {
+                w.write_record(rec)?;
+            }
+            w.flush()?;
+        }
+        Format::Sam => {
+            let mut w = SamWriter::new(out);
+            // Declare all targets up front so the header lists every chrom.
+            for t in &targets {
+                w.declare_target(&t.name, t.seq.len() as u32);
+            }
             for rec in &records {
                 w.write_record(rec)?;
             }

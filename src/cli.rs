@@ -13,6 +13,7 @@ use crate::gapped_extend::GappedParams;
 use crate::hsp::HspParams;
 use crate::scoring::ScoringMatrix;
 use crate::seeds::SeedPattern;
+use crate::tweener::TweenerConfig;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -68,6 +69,16 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub chain: bool,
 
+    /// Run inter-alignment interpolation (upstream `tweener.c`) after
+    /// chaining. Scans the gap between adjacent chain members with a
+    /// denser seed pattern to recover borderline alignments.
+    #[arg(long, default_value_t = false)]
+    pub inner: bool,
+
+    /// Denser seed pattern used by `--inner`. Same syntax as `--seed`.
+    #[arg(long, default_value = "match12")]
+    pub inner_seed: String,
+
     /// Which strand(s) of the query to align.
     #[arg(long, value_enum, default_value_t = StrandArg::Both)]
     pub strand: StrandArg,
@@ -99,6 +110,7 @@ pub struct Cli {
 pub enum Format {
     Maf,
     Paf,
+    Sam,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -127,6 +139,15 @@ pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         ScoringMatrix::hoxd70()
     };
 
+    let tweener = if cli.inner {
+        Some(TweenerConfig {
+            pattern: parse_seed_spec(&cli.inner_seed)?,
+            ..TweenerConfig::default()
+        })
+    } else {
+        None
+    };
+
     Ok(Config {
         pattern,
         matrix,
@@ -138,6 +159,7 @@ pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         gapped_enabled: !cli.nogapped,
         chain_enabled: cli.chain,
         anchor_window: cli.anchor_window.max(1),
+        tweener,
     })
 }
 
