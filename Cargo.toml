@@ -1,0 +1,36 @@
+[package]
+name = "lastz-gxy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+description = "Rust reimplementation of lastz focused on multi-core throughput"
+repository = "https://github.com/nekrut/lastz-gxy"
+
+[[bin]]
+name = "lastz-gxy"
+path = "src/main.rs"
+
+[lib]
+name = "lastz_gxy"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+rayon = "1.10"
+thiserror = "2.0"
+rustc-hash = "2.1"
+# noodles-fasta, memmap2: added in Phase 2 with 2bit/HSX support.
+
+[dev-dependencies]
+proptest = "1.6"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+inherits = "release"
+debug = true

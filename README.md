@@ -9,8 +9,22 @@ the speed comes from parallelism, cache-friendly data structures, SIMD on the
 CPU hot-path, and a portable GPU compute path for seed+HSP — not from relaxing
 the alignment model.
 
-> Status: **proposal / scaffolding**. See [PLAN.md](PLAN.md) for the phased
-> roadmap and parity gate.
+> Status: **Phase 1 scaffolding landed** (scalar, threaded, MAF-only ungapped
+> HSP MVP). See [PLAN.md](PLAN.md) for the phased roadmap and parity gate.
+
+## Quickstart (Phase 1)
+
+```bash
+cargo build --release
+./target/release/lastz-gxy target.fa query.fa \
+    --seed 12of19 --step 1 --hspthresh 3000 --format maf
+```
+
+Today this produces the ungapped-HSP subset of what upstream `lastz --nogapped`
+emits: no chains, no gapped DP, no MAF gap columns. Chaining and gapped
+extension arrive in Phase 2 (see `PLAN.md`). Run `cargo test` to exercise the
+56 unit tests covering scoring, sequences, seeds, `PosTable`, `DiagHash`, HSP
+extension, and the driver.
 
 ## Why another lastz?
 
