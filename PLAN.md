@@ -8,16 +8,23 @@ implementation substrate.** Sensitivity must not regress.
 ## 1. Goals
 
 1. Match upstream lastz 1.04.52 output within the parity gate (§5).
-2. Deliver 20–30× wall-clock speedup on a 32-core CPU for mammalian-scale
-   whole-genome-alignment workloads.
-3. Ship a single static binary; no htslib/autotools/Python runtime.
+2. Deliver 20–30× wall-clock speedup on a 32-core CPU and 50–80× with a
+   commodity GPU for mammalian-scale whole-genome-alignment workloads.
+3. Ship a single binary; no htslib/autotools/Python runtime. GPU support is a
+   feature flag on the same binary, not a separate fork.
 4. Keep the CLI recognisable to existing lastz users for the common flag set.
-5. Stay CPU-only and portable (x86_64 + aarch64). GPU is SegAlign's domain.
+5. Portable across x86_64 + aarch64 CPUs and any Vulkan/Metal/DX12/CUDA GPU.
+   CUDA is opt-in (`--features cuda`), not required.
 
 ## 2. Non-goals
 
 - New alignment algorithms (no WFA, no ksw2 substitution — just SIMD lanes
   over the existing 3-state affine recurrence).
+- **Gapped DP on the GPU.** Branch-heavy traceback is why SegAlign is clanky;
+  we keep gapped extension on the CPU. GPU covers seed lookup + ungapped HSP,
+  which is where ~70 % of upstream wall time actually lives.
+- CUDA as the only GPU path. The authoritative GPU backend is `wgpu`; CUDA is
+  an opt-in perf bump for NVIDIA users.
 - Quantum/probabilistic seeds (`--quantum`). Rare; deferred to Tier 3.
 - LAV, GFA, HSX, and text-align output in v1. MAF/AXT/SAM/PAF only.
 - `--inferscores` in v1 (useful but not hot-path; port in Tier 2).
@@ -77,6 +84,53 @@ Every stage maps 1:1 to an upstream file
 - Phase 1 ships scalar-only and still targets 5–10× end-to-end from threading
   and data-layout alone.
 
+### 3.5 GPU backend (Phase 2.5)
+
+A `Backend` trait in `src/gpu/mod.rs` abstracts the two hot GPU kernels:
+
+```rust
+pub trait Backend: Send + Sync {
+    fn lookup_seeds(&self, query: &Query, pos: &PosTable) -> Vec<SeedHit>;
+    fn ungapped_hsp(&self, hits: &[SeedHit], t: &[u8], q: &[u8],
+                    matrix: &ScoringMatrix, xdrop: i32,
+                    thresh: i32) -> Vec<Hsp>;
+}
+```
+
+Three implementations:
+
+- `CpuBackend` — calls the scalar / SIMD CPU code paths. Reference impl.
+- `WgpuBackend` — default GPU path. WGSL kernels compiled at startup; uses
+  `wgpu::BufferUsages::STORAGE` for `pos_table`, query, and target buffers.
+  Runs on NVIDIA (via Vulkan or CUDA-through-Vulkan), AMD (Vulkan), Intel
+  (Vulkan), Apple Silicon (Metal), Windows-only rigs (DX12).
+- `CudaBackend` (optional, `cudarc`) — hand-written CUDA kernels behind
+  `#[cfg(feature = "cuda")]`. Same algorithm as the WGSL path, tuned for
+  NVIDIA warp semantics and shared memory.
+
+**Dispatch.** `--backend={cpu,gpu,auto}` on the CLI; `auto` picks `gpu` iff a
+`wgpu` adapter with compute support is present and the input size exceeds
+~1 Mbp (below that, CPU wins on transfer overhead alone). CUDA is selected
+transparently inside the `gpu` path when the feature is compiled in and a
+NVIDIA device is present.
+
+**Memory model.** `pos_table` and the reference are uploaded once per
+alignment job (read-only). Query chunks stream in as `~16 Mbp` shards; HSP
+output is copied back in the same shard's streaming window. Peak GPU RSS ≈
+`sizeof(pos_table) + sizeof(ref) + sizeof(shard)` — bounded, independent of
+query size.
+
+**What stays on CPU.** Chaining, anchor selection, gapped 3-state DP,
+tweener, masking updates, all output. This is the deliberate non-goal from
+§2: GPU does the parallel dumb work, CPU does the branchy smart work.
+
+**Parity.** `WgpuBackend` and `CudaBackend` must return HSP sets identical
+to `CpuBackend` on the same input, modulo stable sorting. Any divergence is
+a kernel bug. Differential test harness in `parity/gpu/` runs every PR
+against whatever backend the CI runner exposes; nightly matrix covers
+NVIDIA (Vulkan + CUDA), AMD (Vulkan), and software Vulkan (swiftshader /
+lavapipe) so that a contributor without a GPU can still run the full suite.
+
 ## 4. Phased roadmap
 
 Each phase has a release gate. No phase ships without passing its gate.
@@ -111,16 +165,46 @@ Deliverables:
 Gate: full parity gate (§5) at Jaccard ≥ 0.99 on the benchmark corpus;
 ≥ 15× on 32 cores for human-chr1 vs mouse-chr1.
 
-### Phase 3 — SIMD gapped DP + tweener
+### Phase 2.5 — GPU backend (wgpu default, CUDA optional)
+
+Deliverables:
+- `src/gpu/mod.rs` — `Backend` trait + dispatch (`--backend={cpu,gpu,auto}`).
+- `src/gpu/wgpu/seed.wgsl` — seed lookup against uploaded `pos_table`,
+  writing `(t_pos, q_pos, diag)` triples; one workgroup per query window.
+- `src/gpu/wgpu/hsp.wgsl` — ungapped x-drop extension; one thread per seed
+  hit, 2-bit-packed sequences in `storage` buffers, HOXD70 scoring matrix
+  in constant memory.
+- Streaming host-side driver in `src/gpu/mod.rs` that shards query, uploads,
+  dispatches, reads HSPs back, and feeds them into the existing CPU
+  `chain.rs` → `gapped_extend.rs` pipeline.
+- `parity/gpu/` harness: same fixtures as Tier 2, run with
+  `--backend=cpu` and `--backend=gpu`, compared for bit-exact HSP-set
+  equality.
+- Documentation: GPU minimum requirements (Vulkan 1.2 / Metal 3 / DX12
+  feature level 12_0; ~1 GB VRAM for human-chr1 scale).
+
+Gate: GPU HSP set = CPU HSP set on every Tier 1/2 fixture; end-to-end
+≥ 40× on an RTX 4090 (or equivalent) for human-chr1 vs mouse-chr1; ≥ 20×
+on an Apple M3 Pro integrated GPU; fallback to CPU is clean when no
+adapter is present.
+
+### Phase 3 — SIMD gapped DP + tweener + CUDA backend
 
 Deliverables:
 - Striped-vector 3-state affine DP (AVX2 / NEON lanes). Scalar retained as
   reference impl for differential testing.
 - `tweener.rs` — interpolation stage.
 - `--inferscores` port.
-- Criterion benches for each stage with upstream as baseline.
+- `src/gpu/cuda/` — optional NVIDIA backend behind `--features cuda`, same
+  algorithm as the WGSL kernels but tuned for warp semantics, shared
+  memory, and CUDA streams. Kernels live in `.cu` files compiled via the
+  `cc` crate's CUDA support; loaded at runtime via `cudarc`.
+- Criterion benches for each stage with upstream (and SegAlign, where
+  comparable) as baselines.
 
-Gate: ≥ 20× on 32 cores on the full corpus; parity gate maintained.
+Gate: ≥ 20× on 32 cores on the full corpus; ≥ 60× with the wgpu GPU
+backend; ≥ 80× with the CUDA backend on identical NVIDIA hardware; parity
+gate (including GPU bit-exact HSP sets) maintained across all backends.
 
 ### Phase 4 — Long tail
 
@@ -167,6 +251,19 @@ Four tiers, mirroring `lofreq-gxy`.
 - Random FASTA pairs fed to both binaries for N CPU-hours; any parity-gate
   violation is a release blocker.
 
+### Tier 5 — Backend cross-check (every PR that touches GPU code)
+
+- For every fixture in `parity/fixtures/`, run lastz-gxy three times:
+  `--backend=cpu`, `--backend=gpu` (wgpu), and, if the feature is enabled,
+  `--backend=gpu --features cuda`.
+- Compare the pre-chain HSP sets emitted by each backend (exposed via
+  `--emit-hsps` for testing). Sets must be equal as multisets; no ties, no
+  numeric slack, no "close enough". Traceback and chain/DP still run on CPU
+  so the downstream MAF is by construction identical.
+- Nightly matrix covers NVIDIA Vulkan, NVIDIA CUDA, AMD Vulkan, Apple
+  Metal, and a software Vulkan (lavapipe) row so a contributor without any
+  GPU still gets coverage in CI.
+
 ### Release gate (v1.0)
 
 All four tiers green, plus the per-chromosome numeric thresholds listed in
@@ -199,6 +296,9 @@ All four tiers green, plus the per-chromosome numeric thresholds listed in
 | `--quantum`                          | ❌ Phase 4 |
 | `--self`                             | ⚠️ works by `target==query`; Phase 4 heuristics |
 | `--allocate:*`                       | ❌ ignored (Rust allocator) |
+| `--backend={cpu,gpu,auto}`           | ✅ **new in gxy** — Phase 2.5 |
+| `--gpu-device=N`                     | ✅ **new in gxy** — Phase 2.5 |
+| `--emit-hsps` (testing)              | ✅ **new in gxy** — Phase 2.5 |
 
 Unknown/unsupported flags fail fast with
 `error: flag '--foo' not implemented in lastz-gxy; see PLAN.md §6`.
@@ -220,11 +320,20 @@ Unknown/unsupported flags fail fast with
 | Seed-hash collisions differ from upstream and change HSPs    | Use upstream's hash bitwidth; Tier 2 gate catches it |
 | Memory blow-up from holding whole reference in RAM           | `mmap` 2bit keeps RSS flat; benchmarked on chr1-scale |
 | 20× target unreachable on small targets                      | Document: gains are WGA-scale; short-target overhead is acceptable |
+| `wgpu` driver bugs vary by vendor → HSP-set divergence       | Tier 5 cross-check is per-PR; CPU backend stays authoritative; `--backend=cpu` fallback is always available |
+| GPU memory too small for `pos_table` + reference             | Query-shard streaming keeps VRAM flat; `pos_table` is compact (<200 MB for human); fallback to CPU if VRAM < threshold |
+| CUDA kernel perf diverges from WGSL (both correct but slow)  | Both benched in Phase 3; CUDA is opt-in perf, WGSL is the portability floor |
+| PCIe transfer dominates on small targets                     | `auto` backend picks CPU for targets under ~1 Mbp |
 
 ## 9. Out of scope, but on the radar
 
 - WFA2 as an alternative gapped extender (would change parity gate; tracked
   as a future fork, not a v1 swap).
-- GPU path (would re-converge with SegAlign; not a goal for this repo).
+- **GPU gapped DP.** Variable-length branchy traceback is where SegAlign's
+  complexity and output-semantic drift come from; keeping DP on CPU is the
+  whole point. Revisit only if benches show the CPU tail dominating.
+- Multi-GPU sharding within a single job (per-target-chunk dispatch on
+  separate GPUs). Useful for all-vs-all corpora; tracked for post-v1.
+- ROCm-specific tuning (the wgpu/Vulkan path already runs on AMD).
 - Streaming target from stdin / pipes (useful for progressive alignment
   pipelines).

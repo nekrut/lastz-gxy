@@ -1,11 +1,13 @@
 # lastz-gxy
 
 A Rust reimplementation of [LASTZ](https://github.com/lastz/lastz) focused on
-**throughput on commodity multi-core CPUs** while preserving upstream
-sensitivity. Algorithmic choices (seed patterns, HSP extension, chaining,
-3-state affine gapped DP, interpolation) are carried over unchanged; the speed
-comes from parallelism, cache-friendly data structures, and SIMD on the
-hot-path, not from relaxing the alignment model.
+**throughput on commodity multi-core CPUs — with an optional GPU backend for
+the embarrassingly-parallel seeding and HSP stages** — while preserving
+upstream sensitivity. Algorithmic choices (seed patterns, HSP extension,
+chaining, 3-state affine gapped DP, interpolation) are carried over unchanged;
+the speed comes from parallelism, cache-friendly data structures, SIMD on the
+CPU hot-path, and a portable GPU compute path for seed+HSP — not from relaxing
+the alignment model.
 
 > Status: **proposal / scaffolding**. See [PLAN.md](PLAN.md) for the phased
 > roadmap and parity gate.
@@ -24,21 +26,31 @@ alignment, but in 2026 the upstream code is:
 3. **Monolithic.** One binary handles FASTA/2bit/HSX parsing, masking,
    seeding, HSP, chaining, DP, and eight output formats in ~50 kLOC of C with
    a hand-rolled build. Static binaries and reproducible builds are difficult.
-4. **GPU variants are disjoint.** [SegAlign](https://github.com/gsneha26/SegAlign)
+4. **GPU variants are clanky and disjoint.** [SegAlign](https://github.com/gsneha26/SegAlign)
    and [KegAlign](https://github.com/gsneha26/KegAlign) are separate forks
-   that diverge on output semantics and require CUDA. There is no CPU
-   implementation that simply uses all the cores a workstation already has.
+   that diverge on output semantics, require a CUDA SDK, and lock you out of
+   AMD/Apple hardware. The GPU story should be a feature flag on the main
+   binary, not a fork.
 
 `lastz-gxy` targets the gap between upstream lastz (1 core, portable) and
-SegAlign (GPU, niche): a **single static Rust binary that matches lastz output
-within a parity gate, on any x86_64/arm64 machine, using every core**.
+SegAlign (GPU-only, niche): a **single Rust binary that matches lastz output
+within a parity gate, uses every CPU core by default, and optionally offloads
+seeding + HSP to any GPU that speaks Vulkan/Metal/DX12 (via `wgpu`) or CUDA
+(opt-in feature)**.
 
 ## Non-goals
 
-- **GPU acceleration.** SegAlign/KegAlign already cover that regime.
 - **New alignment algorithms.** Seed, HSP, chain, anchor, align, interp all
   match upstream. No WFA substitution in v1; banded SIMD DP is bolted onto the
   existing recurrence.
+- **Gapped DP on the GPU.** Variable-length, branch-heavy traceback is where
+  SegAlign's complexity comes from. Gapped extension stays on CPU in v1 — GPU
+  covers seeding + ungapped HSP only (the 70 % of upstream wall time).
+- **CUDA-only GPU path.** The default GPU backend is [`wgpu`](https://github.com/gfx-rs/wgpu)
+  (Vulkan / Metal / DX12 / WebGPU) so the same binary runs on NVIDIA, AMD,
+  Intel, and Apple Silicon. A `--features cuda` build via
+  [`cudarc`](https://github.com/coreylowman/cudarc) is opt-in for peak
+  NVIDIA throughput; the `wgpu` path remains authoritative for parity.
 - **Quantum DNA (probabilistic seeds).** Rarely used; deferred behind a
   feature flag.
 - **LAV/GFA/HSX writers in v1.** MAF, AXT, SAM, and PAF cover ~all modern
@@ -59,24 +71,34 @@ Release gate for v1:
 | Per-block score delta (max, outside tie zone)  | ≤ 1              |
 | Total aligned bp delta                         | ≤ 0.1 %          |
 | Identity distribution KS-statistic             | ≤ 0.01           |
+| GPU HSPs vs CPU HSPs (same input, same seed)   | **bit-exact set** |
 
 The 1% Jaccard slack absorbs tie-breaking in seed ordering, diagonal-hash
-eviction, and DP traceback — not sensitivity loss. See
+eviction, and DP traceback — not sensitivity loss. The GPU backend is held to
+a stricter bar: for the same `pos_table` and seed stream, the set of HSPs
+(tuples of `(t_id, q_id, strand, t_start, t_end, q_start, q_end, score)`)
+emitted by `--backend=gpu` must equal the set emitted by `--backend=cpu`.
+Any divergence is a GPU-backend bug, not a parity-gate slack. See
 [PLAN.md §Parity testing](PLAN.md#parity-testing) for the four-tier harness.
 
 ## Performance target
 
-On a 32-core workstation (Zen 4, AVX-512), for `human chr1 vs mouse chr1`
-with `--step=20 --notransition --format=maf`:
+On a 32-core workstation (Zen 4, AVX-512, RTX 4090), for `human chr1 vs mouse
+chr1` with `--step=20 --notransition --format=maf`:
 
-| Implementation           | Wall time  | Speedup |
-|--------------------------|-----------:|--------:|
-| upstream lastz 1.04.52   | baseline   |   1.0×  |
-| lastz-gxy (32 threads)   | target     | 20–30×  |
+| Implementation                              | Wall time | Speedup |
+|---------------------------------------------|----------:|--------:|
+| upstream lastz 1.04.52                      | baseline  |   1.0×  |
+| lastz-gxy (CPU, 32 threads)                 | target    | 20–30×  |
+| lastz-gxy (`--backend=gpu`, wgpu)           | target    | 50–80×  |
+| lastz-gxy (`--backend=gpu --features cuda`) | target    | 80–120× |
 
-Target reflects near-linear scaling across the seeding and HSP stages (the
-current single-thread bottleneck per `perf record` on upstream) plus 2–3× on
-gapped DP from SIMD. Hard numbers published once the MVP lands; see
+CPU target reflects near-linear scaling across the seeding and HSP stages
+(the current single-thread bottleneck per `perf record` on upstream) plus
+2–3× on gapped DP from SIMD. GPU target assumes seeding + HSP fully offloaded
+(consistent with SegAlign's ~100× on those stages) while chain → DP → tweener
+remain on CPU, so Amdahl bounds the end-to-end speedup at ~10× the
+CPU-fraction ratio. Hard numbers published once the MVP lands; see
 `benches/` for reproducible micro-benchmarks.
 
 ## Architecture sketch
@@ -93,6 +115,14 @@ lastz-gxy/
 │   ├── seed_search.rs    - query-side seed iteration, transition handling
 │   ├── diag_hash.rs      - lock-free diagonal hash for hit dedup
 │   ├── hsp.rs            - ungapped x-drop extension (SIMD inner loop)
+│   ├── gpu/
+│   │   ├── mod.rs        - backend trait, feature-gated dispatch
+│   │   ├── wgpu/         - portable backend (Vulkan/Metal/DX12)
+│   │   │   ├── seed.wgsl - seed lookup + diag packing kernel
+│   │   │   └── hsp.wgsl  - ungapped x-drop kernel
+│   │   └── cuda/         - optional CUDA backend (cudarc, --features cuda)
+│   │       ├── seed.cu
+│   │       └── hsp.cu
 │   ├── chain.rs          - HSP chaining (lastz-style, not minimap2)
 │   ├── anchor.rs         - sliding-window midpoint anchor selection
 │   ├── gapped_extend.rs  - 3-state affine DP, banded + SIMD lanes
@@ -119,21 +149,29 @@ lastz-gxy/
 
 ## Performance levers
 
-| Lever                                              | Expected gain | Phase |
-|----------------------------------------------------|--------------:|------:|
-| Rayon work-stealing across (target × strand) pairs |        5–10×  |    1  |
-| Within-target chunking with halo-joined HSPs       |        2–4×   |    2  |
-| SoA `pos_table` with radix-bucketed seed hash      |        1.5–2× |    1  |
-| SIMD ungapped x-drop (AVX2/NEON)                   |        2–3×   |    2  |
-| Banded SIMD 3-state affine DP (KSW2-style lanes)   |        3–5×   |    3  |
-| Lock-free diagonal hash (per-shard, epoch-reclaim) |        1.3×   |    2  |
-| `mmap` 2bit/HSX reference; zero-copy query slice   |        1.2×   |    1  |
-| Streaming MAF/AXT writer, bounded channel          |     I/O-bound |    1  |
-| Minimizer prefilter for `--step ≥ 10` seeds        |        1.5×   |    4  |
+| Lever                                               | Expected gain | Phase |
+|-----------------------------------------------------|--------------:|------:|
+| Rayon work-stealing across (target × strand) pairs  |        5–10×  |    1  |
+| Within-target chunking with halo-joined HSPs        |        2–4×   |    2  |
+| SoA `pos_table` with radix-bucketed seed hash       |        1.5–2× |    1  |
+| SIMD ungapped x-drop (AVX2/NEON)                    |        2–3×   |    2  |
+| Banded SIMD 3-state affine DP (KSW2-style lanes)    |        3–5×   |    3  |
+| Lock-free diagonal hash (per-shard, epoch-reclaim)  |        1.3×   |    2  |
+| `mmap` 2bit/HSX reference; zero-copy query slice    |        1.2×   |    1  |
+| Streaming MAF/AXT writer, bounded channel           |     I/O-bound |    1  |
+| GPU seed lookup + diag packing (`wgpu` compute)     |     30–60× ⁶  |  2.5  |
+| GPU ungapped x-drop (warp-parallel over hits)       |     40–80× ⁶  |  2.5  |
+| CUDA backend (opt-in, same kernels via `cudarc`)    |       1.3–1.6×⁷|    3  |
+| Minimizer prefilter for `--step ≥ 10` seeds         |        1.5×   |    4  |
 
-Multiplicative gains do not compose linearly; the 20–30× target is a
-conservative estimate based on profiling upstream on a 16 Mbp vs 16 Mbp pair
-where seeding + HSP is ~70 % of wall time and gapped DP ~25 %.
+⁶ Over single-thread upstream, on the seed+HSP stages only. End-to-end gain
+  is Amdahl-bounded by the CPU-resident chain/DP/tweener tail.
+⁷ Over the `wgpu` backend on the same NVIDIA GPU.
+
+Multiplicative gains do not compose linearly; the 20–30× CPU target and
+50–80× GPU target are conservative estimates based on profiling upstream on a
+16 Mbp vs 16 Mbp pair where seeding + HSP is ~70 % of wall time and gapped DP
+~25 %.
 
 ## Dependencies
 
@@ -141,10 +179,15 @@ where seeding + HSP is ~70 % of wall time and gapped DP ~25 %.
 - [`rayon`](https://github.com/rayon-rs/rayon) — work-stealing thread pool
 - [`clap`](https://github.com/clap-rs/clap) — CLI
 - [`memmap2`](https://github.com/RazrFalcon/memmap2) — reference mmap
+- [`wgpu`](https://github.com/gfx-rs/wgpu) — portable GPU compute (default GPU backend)
+- [`cudarc`](https://github.com/coreylowman/cudarc) — optional CUDA backend (`--features cuda`)
 - [`criterion`](https://github.com/bheisler/criterion.rs) — benchmarks
 - [`insta`](https://github.com/mitsuhiko/insta) — snapshot tests
 
-No C dependencies. `cargo build --release` produces a single static binary.
+No C dependencies on the default build. `cargo build --release` produces a
+single binary; the `wgpu` GPU path uses whatever Vulkan/Metal/DX12 driver the
+host already has. `cargo build --release --features cuda` additionally links
+against a system CUDA runtime.
 
 ## License
 
