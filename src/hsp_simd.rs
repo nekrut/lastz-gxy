@@ -64,7 +64,6 @@ pub(crate) unsafe fn extend_hit_avx2(
         query,
         matrix_lut,
         ambig_i8,
-        matrix.ambig_score,
         params.x_drop,
         t_pos + seed_len,
         q_pos + seed_len,
@@ -75,7 +74,6 @@ pub(crate) unsafe fn extend_hit_avx2(
         query,
         matrix_lut,
         ambig_i8,
-        matrix.ambig_score,
         params.x_drop,
         t_pos - 1,
         q_pos - 1,
@@ -119,7 +117,6 @@ unsafe fn extend_side(
     query: &PackedSeq,
     matrix_lut: __m128i,
     ambig_i8: i8,
-    ambig_i32: i32,
     x_drop: i32,
     start_t: i64,
     start_q: i64,
@@ -164,12 +161,21 @@ unsafe fn extend_side(
         // `chunk` are padding and marked invalid (their score contributes
         // `ambig_score` but they'll never be reached because the inner
         // scalar loop below only walks `chunk` steps).
+        //
+        // Bounds invariant: the `max_extent` computation above caps
+        // `offset + i < max_extent`, which in turn guarantees the
+        // computed `t` / `q` stay within `[0, t_len)` / `[0, q_len)` for
+        // both directions. The `debug_assert`s below make the invariant
+        // explicit and will trip in debug builds if someone weakens
+        // `max_extent` without re-checking this loop.
         let mut t_codes = [0u8; 16];
         let mut q_codes = [0u8; 16];
         let mut invalid = [0u8; 16];
         for i in 0..chunk {
             let t = start_t + direction * (offset + i) as i64;
             let q = start_q + direction * (offset + i) as i64;
+            debug_assert!(t >= 0 && t < t_len, "SIMD t={t} out of [0, {t_len})");
+            debug_assert!(q >= 0 && q < q_len, "SIMD q={q} out of [0, {q_len})");
             let ti = t as usize;
             let qi = q as usize;
             t_codes[i] = target.code(ti);
@@ -200,10 +206,7 @@ unsafe fn extend_side(
 
         for i in 0..chunk {
             extent += 1;
-            let s = deltas[i] as i32;
-            // Note: `deltas[i]` is already ambig_i32 at invalid positions.
-            let _ = ambig_i32;
-            running = running.saturating_add(s);
+            running = running.saturating_add(deltas[i] as i32);
             if running > best {
                 best = running;
                 best_extent = extent;

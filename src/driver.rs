@@ -103,12 +103,13 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
         let target_ascii = target.seq.to_ascii();
 
         for (qi, query) in queries.iter().enumerate() {
+            let plus_ascii = query.seq.to_ascii();
             let rc_cache = query.seq.reverse_complement();
             let rc_ascii = rc_cache.to_ascii();
 
             for &strand in config.strand.strands() {
                 let (qseq, qascii) = match strand {
-                    Strand::Plus => (&query.seq, &query.seq.to_ascii()),
+                    Strand::Plus => (&query.seq, &plus_ascii),
                     Strand::Minus => (&rc_cache, &rc_ascii),
                 };
                 let hsps = search(
