@@ -35,6 +35,37 @@ cargo build --release
 ./target/release/lastz-gxy target.fa query.fa --seed match12 --nogapped
 ```
 
+## Parity harness
+
+Run the harness against upstream lastz 1.04.52:
+
+```bash
+parity/scripts/build-upstream.sh      # clones + builds pinned lastz tag
+cargo build --release                 # builds lastz-gxy + gxy-compare
+parity/scripts/compare.sh parity/corpus/pseudocat.fa parity/corpus/pseudopig.fa
+```
+
+`gxy-compare` prints block-level Jaccard, per-block score delta, aligned-bp
+delta, per-side-only signatures, and whether the PLAN.md release gate passes.
+Current state on the `pseudocat.fa × pseudopig.fa` fixture (upstream's own
+test data):
+
+| Metric                                      | Value     |
+|---------------------------------------------|-----------|
+| Upstream blocks                             | 14        |
+| lastz-gxy blocks                            | 31        |
+| Jaccard                                     | **0.22**  |
+| **Score delta on shared blocks**            | **0** (median + max) |
+| Aligned bp delta                            | +111 %    |
+| Release gate                                | **FAIL**  |
+
+The zero score-delta on shared blocks says the gapped DP matches upstream
+bit-for-bit *when we agree on the block boundary*. The +111 % aligned-bp
+and the low Jaccard are about *which* blocks we emit — directly attributable
+to three known gaps: no soft-masking (PLAN.md §6 `--masking`), no `--census`
+low-complexity suppression, and subtle chain/tweener differences. Closing
+those is what moves Jaccard from 0.22 toward the 0.99 release gate.
+
 ## Benchmarks
 
 Reproducible micro-benchmarks via `cargo bench` (criterion). Current

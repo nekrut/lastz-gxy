@@ -11,6 +11,10 @@ repository = "https://github.com/nekrut/lastz-gxy"
 name = "lastz-gxy"
 path = "src/main.rs"
 
+[[bin]]
+name = "gxy-compare"
+path = "src/bin/gxy_compare.rs"
+
 [lib]
 name = "lastz_gxy"
 path = "src/lib.rs"

@@ -2,3 +2,9 @@
 Cargo.lock
 *.swp
 .DS_Store
+
+# Parity harness: upstream source + build artifacts + ephemeral runs.
+# The scripts rebuild these on demand — see parity/scripts/build-upstream.sh.
+/parity/upstream/lastz-*/
+/parity/upstream/bin/
+/parity/out/
