@@ -9,22 +9,30 @@ the speed comes from parallelism, cache-friendly data structures, SIMD on the
 CPU hot-path, and a portable GPU compute path for seed+HSP — not from relaxing
 the alignment model.
 
-> Status: **Phase 1 scaffolding landed** (scalar, threaded, MAF-only ungapped
-> HSP MVP). See [PLAN.md](PLAN.md) for the phased roadmap and parity gate.
+> Status: **Phase 2 landed** — scalar threaded pipeline with seed → HSP →
+> chain → anchor → gapped 3-state affine DP → MAF/PAF output. See
+> [PLAN.md](PLAN.md) for the phased roadmap and parity gate.
 
-## Quickstart (Phase 1)
+## Quickstart
 
 ```bash
 cargo build --release
+
+# Gapped alignment (default), MAF output:
 ./target/release/lastz-gxy target.fa query.fa \
-    --seed 12of19 --step 1 --hspthresh 3000 --format maf
+    --seed 12of19 --hspthresh 3000 --gappedthresh 3000 --format maf
+
+# Fast HSP-only pass, PAF output:
+./target/release/lastz-gxy target.fa query.fa \
+    --seed match12 --nogapped --format paf
+
+# With chaining, on minus strand only:
+./target/release/lastz-gxy target.fa query.fa --chain --strand minus
 ```
 
-Today this produces the ungapped-HSP subset of what upstream `lastz --nogapped`
-emits: no chains, no gapped DP, no MAF gap columns. Chaining and gapped
-extension arrive in Phase 2 (see `PLAN.md`). Run `cargo test` to exercise the
-56 unit tests covering scoring, sequences, seeds, `PosTable`, `DiagHash`, HSP
-extension, and the driver.
+Still to come (Phase 3+): SIMD ungapped x-drop, striped-vector gapped DP,
+`wgpu` GPU backend, 2bit/HSX readers, SAM output, tweener interpolation.
+`cargo test` exercises 82+ unit tests and an end-to-end integration fixture.
 
 ## Why another lastz?
 

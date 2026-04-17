@@ -1,20 +1,15 @@
 //! Streaming MAF (Multiple Alignment Format) writer.
 //!
-//! Output follows the MAF 1 spec as used by upstream lastz (`docs/maf_format.html`).
-//! Phase 1 emits only ungapped `s` records; there are no gap characters since
-//! HSPs are by definition gap-free.
-//!
-//! Coordinates:
-//! - Plus strand: `s_start` is 0-based position on the `+` strand.
-//! - Minus strand: `s_start` is 0-based position on the `-` strand
-//!   (MAF spec §coordinate), i.e. `seq_len - q_end` of the forward coords.
+//! Output follows the MAF 1 spec as used by upstream lastz
+//! (`docs/maf_format.html`). Gap columns are rendered as `-` in both the
+//! target and query rows per the spec.
 
 use std::io::{self, Write};
 
 use super::Record;
+use crate::edit_script::render_aligned_bases;
 
-/// A writer that emits one MAF block per `write_record` call. Holds no state
-/// between records; alignments appear in the order they are written.
+/// A writer that emits one MAF block per `write_record` call.
 pub struct MafWriter<W: Write> {
     inner: W,
     header_written: bool,
@@ -30,7 +25,6 @@ impl<W: Write> MafWriter<W> {
         }
     }
 
-    /// Attach a scoring-matrix description for the `##maf` header line.
     pub fn with_scoring_desc(mut self, desc: impl Into<String>) -> Self {
         self.scoring_desc = Some(desc.into());
         self
@@ -51,37 +45,29 @@ impl<W: Write> MafWriter<W> {
     pub fn write_record(&mut self, rec: &Record) -> io::Result<()> {
         self.write_header()?;
 
-        let t_name = &rec.target_name;
-        let q_name = &rec.query_name;
-        let len = rec.hsp.length;
+        let (t_text, q_text) =
+            render_aligned_bases(&rec.script, &rec.target_bases, &rec.query_bases);
 
-        // For the minus strand, the MAF spec wants coordinates expressed on
-        // the reverse-complement strand. Our `hsp.q_start` is already in the
-        // coordinate frame of the sequence we extracted the HSP against
-        // (which is the rc sequence when strand is Minus), so no additional
-        // translation is needed here — the caller has already flipped.
-        let q_strand_char = rec.query_strand.as_char();
-
-        writeln!(self.inner, "a score={}", rec.hsp.score)?;
+        writeln!(self.inner, "a score={}", rec.score)?;
         writeln!(
             self.inner,
             "s {name:<20} {start:>10} {size:>6} {strand} {src_size:>10} {text}",
-            name = t_name,
-            start = rec.hsp.t_start,
-            size = len,
+            name = rec.target_name,
+            start = rec.t_start,
+            size = rec.t_span,
             strand = '+',
             src_size = rec.target_len,
-            text = std::str::from_utf8(&rec.target_bases).unwrap_or("?"),
+            text = std::str::from_utf8(&t_text).unwrap_or("?"),
         )?;
         writeln!(
             self.inner,
             "s {name:<20} {start:>10} {size:>6} {strand} {src_size:>10} {text}",
-            name = q_name,
-            start = rec.hsp.q_start,
-            size = len,
-            strand = q_strand_char,
+            name = rec.query_name,
+            start = rec.q_start,
+            size = rec.q_span,
+            strand = rec.query_strand.as_char(),
             src_size = rec.query_len,
-            text = std::str::from_utf8(&rec.query_bases).unwrap_or("?"),
+            text = std::str::from_utf8(&q_text).unwrap_or("?"),
         )?;
         writeln!(self.inner)?;
         Ok(())
@@ -99,8 +85,14 @@ impl<W: Write> MafWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hsp::Hsp;
+    use crate::edit_script::{EditOp, EditScript};
     use crate::output::Strand;
+
+    fn ungapped_script(n: u32) -> EditScript {
+        let mut s = EditScript::new();
+        s.push(EditOp::Match, n);
+        s
+    }
 
     #[test]
     fn writes_header_once() {
@@ -113,7 +105,12 @@ mod tests {
                 query_name: "chrQ".into(),
                 query_len: 50,
                 query_strand: Strand::Plus,
-                hsp: Hsp { t_start: 10, q_start: 5, length: 4, score: 400 },
+                t_start: 10,
+                q_start: 5,
+                t_span: 4,
+                q_span: 4,
+                score: 400,
+                script: ungapped_script(4),
                 target_bases: b"ACGT".to_vec(),
                 query_bases: b"ACGT".to_vec(),
             };
@@ -121,12 +118,44 @@ mod tests {
             w.write_record(&rec).unwrap();
         }
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(
-            text.matches("##maf").count(),
-            1,
-            "header should appear once:\n{text}"
-        );
+        assert_eq!(text.matches("##maf").count(), 1);
         assert_eq!(text.matches("a score=400").count(), 2);
+    }
+
+    #[test]
+    fn renders_gap_characters_in_both_rows() {
+        let mut script = EditScript::new();
+        script.push(EditOp::Match, 3);
+        script.push(EditOp::InsertQuery, 1); // target gap
+        script.push(EditOp::Match, 2);
+        script.push(EditOp::DeleteQuery, 1); // query gap
+        script.push(EditOp::Match, 1);
+
+        let mut out = Vec::new();
+        {
+            let mut w = MafWriter::new(&mut out);
+            let rec = Record {
+                target_name: "t".into(),
+                target_len: 50,
+                query_name: "q".into(),
+                query_len: 50,
+                query_strand: Strand::Plus,
+                t_start: 0,
+                q_start: 0,
+                t_span: 7,
+                q_span: 7,
+                score: 100,
+                script,
+                target_bases: b"AAACCCA".to_vec(),
+                query_bases: b"AAAGCCCC".to_vec(),
+            };
+            w.write_record(&rec).unwrap();
+        }
+        let text = String::from_utf8(out).unwrap();
+        // Target side should have a '-' where InsertQuery sits.
+        assert!(text.contains("AAA-CC"), "target row missing '-': {text}");
+        // Query side should have a '-' where DeleteQuery sits.
+        assert!(text.contains("-C\n") || text.contains("-C"), "{text}");
     }
 
     #[test]
@@ -140,18 +169,21 @@ mod tests {
                 query_name: "q".into(),
                 query_len: 10,
                 query_strand: Strand::Minus,
-                hsp: Hsp { t_start: 0, q_start: 0, length: 4, score: 100 },
+                t_start: 0,
+                q_start: 0,
+                t_span: 4,
+                q_span: 4,
+                score: 100,
+                script: ungapped_script(4),
                 target_bases: b"ACGT".to_vec(),
                 query_bases: b"ACGT".to_vec(),
             };
             w.write_record(&rec).unwrap();
         }
         let text = String::from_utf8(out).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        // Target line always +; query line picks up the strand.
-        let s_lines: Vec<&&str> = lines.iter().filter(|l| l.starts_with("s ")).collect();
+        let s_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("s ")).collect();
         assert_eq!(s_lines.len(), 2);
-        assert!(s_lines[0].contains(" + "), "{}", s_lines[0]);
-        assert!(s_lines[1].contains(" - "), "{}", s_lines[1]);
+        assert!(s_lines[0].contains(" + "));
+        assert!(s_lines[1].contains(" - "));
     }
 }

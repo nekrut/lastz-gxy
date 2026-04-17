@@ -5,7 +5,7 @@ use clap::Parser;
 
 use lastz_gxy::cli::{build_config, Cli, Format};
 use lastz_gxy::driver::run;
-use lastz_gxy::output::maf::MafWriter;
+use lastz_gxy::output::{maf::MafWriter, paf::PafWriter};
 use lastz_gxy::sequences::load_fasta;
 
 fn main() -> anyhow::Result<()> {
@@ -15,7 +15,7 @@ fn main() -> anyhow::Result<()> {
         rayon::ThreadPoolBuilder::new()
             .num_threads(cli.threads)
             .build_global()
-            .ok(); // If already initialised (e.g. in tests), proceed.
+            .ok();
     }
 
     let config = build_config(&cli)?;
@@ -33,6 +33,13 @@ fn main() -> anyhow::Result<()> {
     match cli.format {
         Format::Maf => {
             let mut w = MafWriter::new(out).with_scoring_desc("HOXD70");
+            for rec in &records {
+                w.write_record(rec)?;
+            }
+            w.flush()?;
+        }
+        Format::Paf => {
+            let mut w = PafWriter::new(out);
             for rec in &records {
                 w.write_record(rec)?;
             }

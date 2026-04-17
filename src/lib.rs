@@ -10,10 +10,14 @@
 //! output ◄── tweener ◄── gapped_extend ◄── anchor ◄── chain
 //! ```
 
+pub mod anchor;
+pub mod chain;
 pub mod cli;
 pub mod diag_hash;
 pub mod dna;
 pub mod driver;
+pub mod edit_script;
+pub mod gapped_extend;
 pub mod hsp;
 pub mod output;
 pub mod pos_table;

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use clap::{Parser, ValueEnum};
 
 use crate::driver::{Config, StrandSpec};
+use crate::gapped_extend::GappedParams;
 use crate::hsp::HspParams;
 use crate::scoring::ScoringMatrix;
 use crate::seeds::SeedPattern;
@@ -17,7 +18,7 @@ use crate::seeds::SeedPattern;
 #[command(
     name = "lastz-gxy",
     version,
-    about = "Multi-core Rust reimplementation of lastz (ungapped HSP MVP)"
+    about = "Multi-core Rust reimplementation of lastz"
 )]
 pub struct Cli {
     /// Target FASTA (the reference side; gets indexed).
@@ -28,8 +29,7 @@ pub struct Cli {
     #[arg(value_name = "QUERY")]
     pub query: PathBuf,
 
-    /// Output format. v1 Phase 1 ships MAF only; `axt`, `sam`, `paf`
-    /// land with Phase 2 gapped extension.
+    /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Maf)]
     pub format: Format,
 
@@ -40,18 +40,33 @@ pub struct Cli {
     #[arg(long, default_value = "12of19")]
     pub seed: String,
 
-    /// Stride between successive query / reference seed windows. `1` hits
-    /// every position; larger values speed up at the cost of sensitivity.
+    /// Stride between successive query / reference seed windows.
     #[arg(long, default_value_t = 1)]
     pub step: usize,
 
-    /// X-drop threshold for ungapped extension.
+    /// X-drop threshold for ungapped HSP extension.
     #[arg(long, default_value_t = 910)]
     pub xdrop: i32,
 
-    /// Minimum ungapped HSP score to report.
-    #[arg(long, default_value_t = 3000)]
+    /// Minimum ungapped HSP score to keep for gapped extension.
+    #[arg(long, default_value_t = 3_000)]
     pub hspthresh: i32,
+
+    /// Y-drop threshold for gapped affine extension.
+    #[arg(long, default_value_t = 9_400)]
+    pub ydrop: i32,
+
+    /// Minimum gapped alignment score to report.
+    #[arg(long, default_value_t = 3_000)]
+    pub gappedthresh: i32,
+
+    /// Skip gapped extension; output ungapped HSPs only.
+    #[arg(long, default_value_t = false)]
+    pub nogapped: bool,
+
+    /// Filter HSPs through lastz-style chaining before extension.
+    #[arg(long, default_value_t = false)]
+    pub chain: bool,
 
     /// Which strand(s) of the query to align.
     #[arg(long, value_enum, default_value_t = StrandArg::Both)]
@@ -66,8 +81,12 @@ pub struct Cli {
     #[arg(long, default_value_t = 0)]
     pub max_word_count: u32,
 
-    /// Number of worker threads. `0` (default) uses `rayon`'s default, which
-    /// matches the number of logical CPUs.
+    /// Anchor window width (columns) used to pick the gapped-extension
+    /// start position inside each HSP.
+    #[arg(long, default_value_t = 31)]
+    pub anchor_window: u32,
+
+    /// Worker thread count. `0` uses `rayon`'s default (logical CPU count).
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
 
@@ -79,6 +98,7 @@ pub struct Cli {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Format {
     Maf,
+    Paf,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -98,7 +118,6 @@ impl From<StrandArg> for StrandSpec {
     }
 }
 
-/// Resolve the CLI into a runtime `Config`.
 pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
     let pattern = parse_seed_spec(&cli.seed)?;
     let matrix = if let Some(path) = &cli.scores {
@@ -113,8 +132,12 @@ pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         matrix,
         step: cli.step.max(1),
         hsp: HspParams { x_drop: cli.xdrop, hsp_threshold: cli.hspthresh },
+        gapped: GappedParams { y_drop: cli.ydrop, gapped_threshold: cli.gappedthresh },
         strand: cli.strand.into(),
         max_word_count: cli.max_word_count,
+        gapped_enabled: !cli.nogapped,
+        chain_enabled: cli.chain,
+        anchor_window: cli.anchor_window.max(1),
     })
 }
 

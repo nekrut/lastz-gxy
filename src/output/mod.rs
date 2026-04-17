@@ -1,14 +1,17 @@
 //! Alignment output writers.
 //!
-//! Phase 1 ships MAF (ungapped HSPs only; gapped blocks arrive in Phase 2).
-//! AXT, SAM, and PAF land alongside gapped extension in Phase 2.
+//! Phase 2 unifies gapped and ungapped alignments into a single `Record`
+//! that carries an `EditScript`. An ungapped HSP is encoded as a script of
+//! one `Match` run; a gapped alignment is the full DP traceback.
 
 pub mod maf;
+pub mod paf;
 
-use crate::hsp::Hsp;
+use crate::edit_script::EditScript;
 
-/// A single emitted alignment block. Phase 1 populates only the HSP variant;
-/// Phase 2 introduces a `Gapped` variant carrying an edit script.
+/// One emitted alignment block. The raw `target_bases` / `query_bases` are
+/// the un-gapped base slices; writers use `script` to render them with `-`
+/// in the correct positions.
 #[derive(Debug, Clone)]
 pub struct Record {
     pub target_name: String,
@@ -16,9 +19,23 @@ pub struct Record {
     pub query_name: String,
     pub query_len: u32,
     pub query_strand: Strand,
-    pub hsp: Hsp,
+    pub t_start: u32,
+    pub q_start: u32,
+    pub t_span: u32,
+    pub q_span: u32,
+    pub score: i32,
+    pub script: EditScript,
     pub target_bases: Vec<u8>,
     pub query_bases: Vec<u8>,
+}
+
+impl Record {
+    pub fn t_end(&self) -> u32 {
+        self.t_start + self.t_span
+    }
+    pub fn q_end(&self) -> u32 {
+        self.q_start + self.q_span
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
