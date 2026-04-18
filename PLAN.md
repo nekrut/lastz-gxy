@@ -84,6 +84,17 @@ Every stage maps 1:1 to an upstream file
 - Phase 1 ships scalar-only and still targets 5–10× end-to-end from threading
   and data-layout alone.
 
+**Failed experiment (2026-04, tracked here so nobody repeats it).** A naive
+banded rewrite of `extend_one_side` — per-row compute window `[lo-1, hi+1]`
+with `y_drop` pruning — was tried to close the cross-species parity gap
+(see §5 below). It *decreased* parity: cat × pig Jaccard 0.67 → 0.18,
+shared blocks 14 → 7. The +1-per-row growth is too tight for alignments
+with early large gaps, dropping blocks upstream emits. A correct banded DP
+needs a band width closer to `y_drop / gap_extend` (≈ 313 for HOXD70
+defaults), not a fixed constant, and should probably drop the strict
+expansion limit and rely purely on `y_drop` pruning. Revisit as part of
+the striped-SIMD rewrite.
+
 ### 3.5 GPU backend (Phase 2.5)
 
 A `Backend` trait in `src/gpu/mod.rs` abstracts the two hot GPU kernels:
