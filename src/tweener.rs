@@ -185,11 +185,13 @@ pub fn interpolate(
 fn subseq(seq: &PackedSeq, start: usize, end: usize) -> PackedSeq {
     let mut out = PackedSeq::with_capacity(end - start);
     for i in start..end {
-        if seq.is_valid(i) {
-            out.push_ascii(crate::dna::decode_base(seq.code(i)));
+        let byte = if seq.is_valid(i) {
+            let c = crate::dna::decode_base(seq.code(i));
+            if seq.is_masked(i) { c.to_ascii_lowercase() } else { c }
         } else {
-            out.push_ascii(b'N');
-        }
+            b'N'
+        };
+        out.push_ascii(byte);
     }
     out
 }
@@ -213,6 +215,7 @@ mod tests {
             gapped: GappedParams { y_drop: 9_400, gapped_threshold: 3_000 },
             strand: StrandSpec::Plus,
             max_word_count: 0,
+            respect_masking: true,
             gapped_enabled: true,
             chain_enabled: true,
             anchor_window: 31,

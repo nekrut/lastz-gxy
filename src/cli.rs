@@ -92,6 +92,12 @@ pub struct Cli {
     #[arg(long, default_value_t = 0)]
     pub max_word_count: u32,
 
+    /// Ignore soft-masking (lowercase `acgt` in the FASTA) when picking
+    /// seed positions. Matches upstream lastz's `--nomasking`. The default
+    /// behaviour — honoring soft-masks — matches upstream's default.
+    #[arg(long, default_value_t = false)]
+    pub nomasking: bool,
+
     /// Anchor window width (columns) used to pick the gapped-extension
     /// start position inside each HSP.
     #[arg(long, default_value_t = 31)]
@@ -156,6 +162,7 @@ pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         gapped: GappedParams { y_drop: cli.ydrop, gapped_threshold: cli.gappedthresh },
         strand: cli.strand.into(),
         max_word_count: cli.max_word_count,
+        respect_masking: !cli.nomasking,
         gapped_enabled: !cli.nogapped,
         chain_enabled: cli.chain,
         anchor_window: cli.anchor_window.max(1),

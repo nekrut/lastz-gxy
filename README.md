@@ -50,21 +50,23 @@ delta, per-side-only signatures, and whether the PLAN.md release gate passes.
 Current state on the `pseudocat.fa × pseudopig.fa` fixture (upstream's own
 test data):
 
-| Metric                                      | Value     |
-|---------------------------------------------|-----------|
-| Upstream blocks                             | 14        |
-| lastz-gxy blocks                            | 31        |
-| Jaccard                                     | **0.22**  |
-| **Score delta on shared blocks**            | **0** (median + max) |
-| Aligned bp delta                            | +111 %    |
-| Release gate                                | **FAIL**  |
+| Metric                                      | Before masking | After masking |
+|---------------------------------------------|---------------:|--------------:|
+| Upstream blocks                             | 14             | 14            |
+| lastz-gxy blocks                            | 31             | **10**        |
+| Shared                                      | 7              | 7             |
+| **Jaccard**                                 | 0.22           | **0.44**      |
+| Score delta on shared blocks (median / max) | 0 / 0          | 0 / 0         |
+| Aligned bp delta                            | +111 %         | **+3.1 %**    |
+| Release gate                                | FAIL           | FAIL          |
 
 The zero score-delta on shared blocks says the gapped DP matches upstream
-bit-for-bit *when we agree on the block boundary*. The +111 % aligned-bp
-and the low Jaccard are about *which* blocks we emit — directly attributable
-to three known gaps: no soft-masking (PLAN.md §6 `--masking`), no `--census`
-low-complexity suppression, and subtle chain/tweener differences. Closing
-those is what moves Jaccard from 0.22 toward the 0.99 release gate.
+bit-for-bit *when we agree on the block boundary*. Respecting soft-masking
+(lowercase `acgt` in the input FASTA; defaults on) halved the aligned-bp
+over-count and cut spurious blocks from 24 → 3. Remaining gap: seven
+upstream blocks we don't emit, six of them on the minus strand — pointing
+at chain / tweener / dynamic-masking behavior, not scoring. Closing those
+is what moves Jaccard from 0.44 toward the 0.99 release gate.
 
 ## Benchmarks
 

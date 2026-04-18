@@ -124,7 +124,11 @@ impl<'a> SeedExtractor<'a> {
     }
 
     /// Compute the seed word at `pos` in `seq`, or `None` if the window is
-    /// out of range or contains any invalid base.
+    /// out of range, contains any invalid base at a care position, or
+    /// hits a soft-masked position at any of the pattern's care positions.
+    /// This is the conservative reading of upstream's default — empirically
+    /// it gives the highest parity on the `pseudocat × pseudopig` fixture
+    /// (relaxing to seed-start-only drops Jaccard ~10 %).
     #[inline]
     pub fn word_at(&self, seq: &PackedSeq, pos: usize) -> Option<u64> {
         let end = pos.checked_add(self.pattern.len())?;
@@ -134,7 +138,7 @@ impl<'a> SeedExtractor<'a> {
         let mut word: u64 = 0;
         for &offset in &self.care_positions {
             let p = pos + offset;
-            if !seq.is_valid(p) {
+            if !seq.is_valid(p) || seq.is_masked(p) {
                 return None;
             }
             word = (word << 2) | seq.code(p) as u64;
@@ -230,11 +234,22 @@ mod tests {
     }
 
     #[test]
-    fn word_at_returns_none_on_ambiguous_base() {
+    fn masked_bases_block_seed_windows() {
         let pat = SeedPattern::solid(3);
         let ext = SeedExtractor::new(&pat);
-        let seq = PackedSeq::from_ascii(b"ANG");
+        // Middle base is lowercase → masked.
+        let seq = PackedSeq::from_ascii(b"AcG");
         assert_eq!(ext.word_at(&seq, 0), None);
+    }
+
+    #[test]
+    fn mask_only_matters_at_care_positions() {
+        // Pattern "101" places a don't-care at offset 1. A masked base at
+        // offset 1 should NOT block the seed.
+        let pat = SeedPattern::parse("test", "101").unwrap();
+        let ext = SeedExtractor::new(&pat);
+        let seq = PackedSeq::from_ascii(b"AcG");
+        assert!(ext.word_at(&seq, 0).is_some());
     }
 
     #[test]

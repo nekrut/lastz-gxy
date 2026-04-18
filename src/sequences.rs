@@ -2,8 +2,12 @@
 //!
 //! v1 supports ASCII FASTA via `noodles-fasta`. 2bit and HSX are tracked for
 //! Phase 2 (PLAN.md §3.3). Internally sequences are held as `PackedSeq`: a
-//! 2-bit-encoded nucleotide buffer plus a parallel `valid` bitset so `N`
-//! regions can be skipped without polluting the nucleotide stream.
+//! 2-bit-encoded nucleotide buffer, a parallel `valid` bitset so `N` regions
+//! can be skipped without polluting the nucleotide stream, and a parallel
+//! `mask` bitset recording soft-masked positions (lowercase ACGT in the
+//! input FASTA). Soft-masked positions are still valid for extension but
+//! are excluded from seeding — the same semantics upstream lastz uses
+//! without `--nomasking`.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -29,15 +33,18 @@ impl Sequence {
     }
 }
 
-/// 2-bit-packed DNA with a parallel validity bitset.
+/// 2-bit-packed DNA with parallel `valid` and `mask` bitsets.
 ///
-/// Layout is little-endian within each byte: position `i` of the nucleotide
-/// code lives in bits `(i%4)*2 .. (i%4)*2+2` of `codes[i/4]`. Validity lives
-/// in `valid[i/8]`, bit `i%8`.
+/// - `codes`: nucleotide packed 4 per byte (little-endian within each byte).
+/// - `valid[i/8] bit i%8`: is set when position `i` is unambiguous ACGT.
+/// - `mask[i/8] bit i%8`:  is set when position `i` was soft-masked in the
+///   input (lowercase `acgt`). `mask` is purely a seeding signal; it does
+///   not affect scoring or extension.
 #[derive(Debug, Clone)]
 pub struct PackedSeq {
     codes: Vec<u8>,
     valid: Vec<u8>,
+    mask: Vec<u8>,
     len: usize,
 }
 
@@ -46,6 +53,7 @@ impl PackedSeq {
         Self {
             codes: Vec::new(),
             valid: Vec::new(),
+            mask: Vec::new(),
             len: 0,
         }
     }
@@ -54,11 +62,13 @@ impl PackedSeq {
         Self {
             codes: Vec::with_capacity((n + 3) / 4),
             valid: Vec::with_capacity((n + 7) / 8),
+            mask: Vec::with_capacity((n + 7) / 8),
             len: 0,
         }
     }
 
-    /// Build a `PackedSeq` from an ASCII nucleotide slice.
+    /// Build a `PackedSeq` from an ASCII nucleotide slice, preserving case
+    /// as a soft-mask signal (lowercase `acgt` → masked).
     pub fn from_ascii(bases: &[u8]) -> Self {
         let mut out = Self::with_capacity(bases.len());
         for &b in bases {
@@ -89,10 +99,16 @@ impl PackedSeq {
         let vbit = self.len & 7;
         if vbit == 0 {
             self.valid.push(0);
+            self.mask.push(0);
         }
         if valid {
             let vlast = self.valid.last_mut().unwrap();
             *vlast |= 1 << vbit;
+        }
+        // Soft-mask: ACGT that arrived as lowercase.
+        if valid && b.is_ascii_lowercase() {
+            let mlast = self.mask.last_mut().unwrap();
+            *mlast |= 1 << vbit;
         }
         self.len += 1;
     }
@@ -110,6 +126,20 @@ impl PackedSeq {
         (self.valid[i >> 3] >> (i & 7)) & 1 != 0
     }
 
+    /// Was position `i` soft-masked (lowercase) in the input?
+    #[inline]
+    pub fn is_masked(&self, i: usize) -> bool {
+        (self.mask[i >> 3] >> (i & 7)) & 1 != 0
+    }
+
+    /// Clear all soft-mask bits. Used when the caller wants to bypass
+    /// masking for a run (the `--nomasking` CLI flag).
+    pub fn clear_masks(&mut self) {
+        for byte in &mut self.mask {
+            *byte = 0;
+        }
+    }
+
     /// Decode back to uppercase ASCII. Invalid positions become `N`.
     pub fn to_ascii(&self) -> Vec<u8> {
         (0..self.len)
@@ -117,16 +147,21 @@ impl PackedSeq {
             .collect()
     }
 
-    /// Reverse-complement into a new `PackedSeq`.
+    /// Reverse-complement into a new `PackedSeq`. The `mask` bitset is
+    /// carried over so position `len-1-i` in the output is masked iff
+    /// position `i` in the input was masked.
     pub fn reverse_complement(&self) -> Self {
         let mut out = Self::with_capacity(self.len);
         for i in (0..self.len).rev() {
-            if self.is_valid(i) {
+            let was_masked = self.is_masked(i);
+            let byte = if self.is_valid(i) {
                 let c = (!self.code(i)) & 0b11;
-                out.push_ascii(decode_base(c));
+                let ch = decode_base(c);
+                if was_masked { ch.to_ascii_lowercase() } else { ch }
             } else {
-                out.push_ascii(b'N');
-            }
+                b'N'
+            };
+            out.push_ascii(byte);
         }
         out
     }
@@ -258,5 +293,47 @@ mod tests {
         let seqs = parse_fasta(text.as_bytes()).unwrap();
         assert_eq!(seqs.len(), 1);
         assert_eq!(seqs[0].seq.to_ascii(), b"ACGTACGT");
+        // First four (lowercase) are soft-masked, latter four are not.
+        let s = &seqs[0].seq;
+        for i in 0..4 {
+            assert!(s.is_masked(i), "pos {i} should be masked");
+        }
+        for i in 4..8 {
+            assert!(!s.is_masked(i), "pos {i} should not be masked");
+        }
+    }
+
+    #[test]
+    fn packed_records_soft_mask_for_lowercase() {
+        let packed = PackedSeq::from_ascii(b"ACgtAC");
+        assert!(!packed.is_masked(0));
+        assert!(!packed.is_masked(1));
+        assert!(packed.is_masked(2));
+        assert!(packed.is_masked(3));
+        assert!(!packed.is_masked(4));
+        assert!(!packed.is_masked(5));
+    }
+
+    #[test]
+    fn clear_masks_wipes_the_bitset() {
+        let mut packed = PackedSeq::from_ascii(b"ACgtAC");
+        assert!(packed.is_masked(2));
+        packed.clear_masks();
+        for i in 0..packed.len() {
+            assert!(!packed.is_masked(i));
+        }
+    }
+
+    #[test]
+    fn reverse_complement_carries_mask_over() {
+        let packed = PackedSeq::from_ascii(b"ACgtAC"); // mask at 2,3
+        let rc = packed.reverse_complement();
+        // RC of "ACgtAC" is "GTacGT" (complement + reverse; mask moves too).
+        // Original mask positions 2,3 → RC positions 2,3 (len 6).
+        assert!(rc.is_masked(2));
+        assert!(rc.is_masked(3));
+        for i in [0, 1, 4, 5] {
+            assert!(!rc.is_masked(i), "pos {i} of RC unexpectedly masked");
+        }
     }
 }

@@ -19,8 +19,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     let config = build_config(&cli)?;
-    let targets = load_fasta(&cli.target)?;
-    let queries = load_fasta(&cli.query)?;
+    let mut targets = load_fasta(&cli.target)?;
+    let mut queries = load_fasta(&cli.query)?;
+
+    if !config.respect_masking {
+        for s in targets.iter_mut().chain(queries.iter_mut()) {
+            s.seq.clear_masks();
+        }
+    }
 
     let records = run(&targets, &queries, &config);
 

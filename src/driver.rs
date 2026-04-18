@@ -57,6 +57,10 @@ pub struct Config {
     /// Maximum seed-word multiplicity before a word is dropped as "hot". 0
     /// disables the filter.
     pub max_word_count: u32,
+    /// Honor soft-masking (lowercase `acgt`) when picking seed positions.
+    /// `true` matches upstream lastz's default; set to `false` for
+    /// `--nomasking`.
+    pub respect_masking: bool,
     /// Run gapped affine extension after HSP. When false, the pipeline
     /// stops at HSPs (equivalent to upstream `--nogapped`).
     pub gapped_enabled: bool,
@@ -81,6 +85,7 @@ impl Default for Config {
             gapped: GappedParams::default(),
             strand: StrandSpec::Both,
             max_word_count: 0,
+            respect_masking: true,
             gapped_enabled: true,
             chain_enabled: false,
             anchor_window: 31,
