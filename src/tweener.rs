@@ -121,6 +121,7 @@ pub fn interpolate(
                 step: 1,
                 hsp: hsp_params,
                 transitions: driver_cfg.transitions,
+                entropy_threshold: driver_cfg.entropy_threshold,
             },
         );
         if hsps.is_empty() {
@@ -223,6 +224,7 @@ mod tests {
             chain_enabled: true,
             anchor_window: 31,
             transitions: 1,
+            entropy_threshold: None,
             tweener: None,
         }
     }

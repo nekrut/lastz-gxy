@@ -109,6 +109,19 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub notransition: bool,
 
+    /// Enable KegAlign's Shannon-entropy HSP filter: reject HSPs whose
+    /// `score × (H / 2)` (with `H` = base-composition entropy of the
+    /// target slice) falls below `--entropy-threshold` (defaults to
+    /// `--hspthresh`). Drops homopolymeric / repeat HSPs that pass the
+    /// raw score gate but contribute no real homology signal.
+    #[arg(long, default_value_t = false)]
+    pub entropy: bool,
+
+    /// Override the entropy gate's reference score (defaults to
+    /// `--hspthresh`). Only meaningful with `--entropy`.
+    #[arg(long)]
+    pub entropy_threshold: Option<i32>,
+
     /// Anchor window width (columns) used to pick the gapped-extension
     /// start position inside each HSP.
     #[arg(long, default_value_t = 31)]
@@ -166,6 +179,11 @@ pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
     };
 
     let transitions = if cli.notransition { 0 } else { cli.transition.min(2) };
+    let entropy_threshold = if cli.entropy {
+        Some(cli.entropy_threshold.unwrap_or(cli.hspthresh))
+    } else {
+        None
+    };
 
     Ok(Config {
         pattern,
@@ -180,6 +198,7 @@ pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         chain_enabled: cli.chain,
         anchor_window: cli.anchor_window.max(1),
         transitions,
+        entropy_threshold,
         tweener,
     })
 }

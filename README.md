@@ -50,15 +50,15 @@ delta, per-side-only signatures, and whether the PLAN.md release gate passes.
 Current state on the `pseudocat.fa × pseudopig.fa` fixture (upstream's own
 test data):
 
-| Metric                                      | Base  | + mask | + trans | + dedup |
-|---------------------------------------------|------:|-------:|--------:|--------:|
-| Upstream blocks                             | 14    | 14     | 14      | 14      |
-| lastz-gxy blocks                            | 31    | 10     | 42      | **21**  |
-| Shared                                      | 7     | 7      | 14      | **14**  |
-| **Jaccard**                                 | 0.22  | 0.44   | 0.67    | **0.67**|
-| Score Δ on shared (median / max)            | 0 / 0 | 0 / 0  | 0 / 0   | 0 / 0   |
-| Aligned bp Δ                                | +111% | +3%    | +334%   | **+42%**|
-| Release gate                                | FAIL  | FAIL   | FAIL    | FAIL    |
+| Metric                                      | Base  | + mask | + trans | + dedup | + entropy |
+|---------------------------------------------|------:|-------:|--------:|--------:|----------:|
+| Upstream blocks                             | 14    | 14     | 14      | 14      | 14        |
+| lastz-gxy blocks                            | 31    | 10     | 42      | 21      | **20**    |
+| Shared                                      | 7     | 7      | 14      | 14      | **14**    |
+| **Jaccard**                                 | 0.22  | 0.44   | 0.67    | 0.67    | **0.70**  |
+| Score Δ on shared (median / max)            | 0 / 0 | 0 / 0  | 0 / 0   | 0 / 0   | 0 / 0     |
+| Aligned bp Δ                                | +111% | +3%    | +334%   | +42%    | ~ +40%    |
+| Release gate                                | FAIL  | FAIL   | FAIL    | FAIL    | FAIL      |
 
 The zero score-delta on shared blocks says the gapped DP matches upstream
 bit-for-bit *when we agree on the block boundary*. After soft-masking,

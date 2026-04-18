@@ -17,6 +17,7 @@ pub mod diag_hash;
 pub mod dna;
 pub mod driver;
 pub mod edit_script;
+pub mod entropy;
 pub mod gapped_extend;
 pub mod hsp;
 mod hsp_simd;

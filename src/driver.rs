@@ -72,6 +72,10 @@ pub struct Config {
     /// Transition substitutions tolerated per seed (upstream
     /// `--transition`/`--notransition`; 0 = none, 1 = one, 2 = two).
     pub transitions: u8,
+    /// When `Some`, apply KegAlign's Shannon-entropy gate to every HSP:
+    /// drop HSPs whose target-slice entropy, scaled against the raw
+    /// score, is below this threshold. Opt-in via `--entropy`.
+    pub entropy_threshold: Option<i32>,
     /// Inter-alignment interpolation (upstream `tweener.c`). When `Some`,
     /// runs after chaining on each `(target, query, strand)` triple with
     /// the supplied tweener parameters.
@@ -93,6 +97,7 @@ impl Default for Config {
             chain_enabled: false,
             anchor_window: 31,
             transitions: 1,
+            entropy_threshold: None,
             tweener: None,
         }
     }
@@ -130,6 +135,7 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                         step: config.step,
                         hsp: config.hsp,
                         transitions: config.transitions,
+                        entropy_threshold: config.entropy_threshold,
                     },
                 );
                 if hsps.is_empty() {

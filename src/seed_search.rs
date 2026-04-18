@@ -23,6 +23,10 @@ pub struct SearchParams {
     /// upstream's `--notransition`; `1` is the default (`--transition`);
     /// `2` is `--transition=2`.
     pub transitions: u8,
+    /// When `Some(threshold)`, reject HSPs whose entropy-scaled score
+    /// (`score * H / 2`, `H` = Shannon entropy of the target slice) is
+    /// below `threshold`. KegAlign's low-complexity filter, opt-in.
+    pub entropy_threshold: Option<i32>,
 }
 
 impl Default for SearchParams {
@@ -31,6 +35,7 @@ impl Default for SearchParams {
             step: 1,
             hsp: HspParams::default(),
             transitions: 1,
+            entropy_threshold: None,
         }
     }
 }
@@ -94,6 +99,17 @@ pub fn search(
                 else {
                     continue;
                 };
+                if let Some(thresh) = params.entropy_threshold {
+                    if !crate::entropy::passes_entropy_gate(
+                        target,
+                        hsp.t_start,
+                        hsp.t_end(),
+                        hsp.score,
+                        thresh,
+                    ) {
+                        continue;
+                    }
+                }
                 diag.mark_covered(hsp.t_end(), hsp.q_end());
                 out.push(hsp);
             }
@@ -134,6 +150,7 @@ mod tests {
                 step: 1,
                 hsp: HspParams { x_drop: 500, hsp_threshold: 1000 },
                 transitions: 0,
+                entropy_threshold: None,
             },
         );
         assert_eq!(hsps.len(), 1, "expected one HSP, got {hsps:#?}");
@@ -162,6 +179,7 @@ mod tests {
                 step: 1,
                 hsp: HspParams { x_drop: 500, hsp_threshold: 50 },
                 transitions: 0,
+                entropy_threshold: None,
             },
         );
         assert!(no_trans.is_empty(), "unexpected hits without transitions");
@@ -175,6 +193,7 @@ mod tests {
                 step: 1,
                 hsp: HspParams { x_drop: 500, hsp_threshold: 50 },
                 transitions: 1,
+                entropy_threshold: None,
             },
         );
         assert!(!with_trans.is_empty(), "expected at least one transition hit");
@@ -195,6 +214,7 @@ mod tests {
                 step: 1,
                 hsp: HspParams { x_drop: 100, hsp_threshold: 100 },
                 transitions: 0,
+                entropy_threshold: None,
             },
         );
         assert!(hsps.is_empty());
@@ -218,6 +238,7 @@ mod tests {
                 step: 1,
                 hsp: HspParams { x_drop: 500, hsp_threshold: 500 },
                 transitions: 0,
+                entropy_threshold: None,
             },
         );
         let unique_diagonals: std::collections::BTreeSet<_> =
@@ -250,6 +271,7 @@ mod tests {
                 step: 1,
                 hsp: HspParams { x_drop: 500, hsp_threshold: 500 },
                 transitions: 0,
+                entropy_threshold: None,
             },
         );
         let diagonals: std::collections::BTreeSet<_> =
