@@ -78,8 +78,7 @@ pub fn interpolate(
     let hsp_params = HspParams {
         x_drop: driver_cfg.hsp.x_drop,
         hsp_threshold: relaxed_hsp_thresh,
-    };
-    let relaxed_gapped_thresh =
+    };    let relaxed_gapped_thresh =
         (driver_cfg.gapped.gapped_threshold / tween_cfg.relax_factor.max(1)).max(100);
     let gapped_params = crate::gapped_extend::GappedParams {
         y_drop: driver_cfg.gapped.y_drop,
@@ -118,7 +117,11 @@ pub fn interpolate(
             &t_sub,
             &q_sub,
             matrix,
-            &SearchParams { step: 1, hsp: hsp_params },
+            &SearchParams {
+                step: 1,
+                hsp: hsp_params,
+                transitions: driver_cfg.transitions,
+            },
         );
         if hsps.is_empty() {
             continue;
@@ -219,6 +222,7 @@ mod tests {
             gapped_enabled: true,
             chain_enabled: true,
             anchor_window: 31,
+            transitions: 1,
             tweener: None,
         }
     }

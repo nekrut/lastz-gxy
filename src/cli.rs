@@ -98,6 +98,17 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub nomasking: bool,
 
+    /// Number of transition substitutions allowed per seed. Matches
+    /// upstream: 0 = `--notransition`, 1 = `--transition` (the default),
+    /// 2 = `--transition=2`.
+    #[arg(long, default_value_t = 1)]
+    pub transition: u8,
+
+    /// Shorthand for `--transition=0`. Takes precedence over `--transition`
+    /// when both are given.
+    #[arg(long, default_value_t = false)]
+    pub notransition: bool,
+
     /// Anchor window width (columns) used to pick the gapped-extension
     /// start position inside each HSP.
     #[arg(long, default_value_t = 31)]
@@ -154,6 +165,8 @@ pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         None
     };
 
+    let transitions = if cli.notransition { 0 } else { cli.transition.min(2) };
+
     Ok(Config {
         pattern,
         matrix,
@@ -166,6 +179,7 @@ pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         gapped_enabled: !cli.nogapped,
         chain_enabled: cli.chain,
         anchor_window: cli.anchor_window.max(1),
+        transitions,
         tweener,
     })
 }

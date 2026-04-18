@@ -69,6 +69,9 @@ pub struct Config {
     pub chain_enabled: bool,
     /// Sliding window width for anchor selection inside each HSP.
     pub anchor_window: u32,
+    /// Transition substitutions tolerated per seed (upstream
+    /// `--transition`/`--notransition`; 0 = none, 1 = one, 2 = two).
+    pub transitions: u8,
     /// Inter-alignment interpolation (upstream `tweener.c`). When `Some`,
     /// runs after chaining on each `(target, query, strand)` triple with
     /// the supplied tweener parameters.
@@ -89,6 +92,7 @@ impl Default for Config {
             gapped_enabled: true,
             chain_enabled: false,
             anchor_window: 31,
+            transitions: 1,
             tweener: None,
         }
     }
@@ -122,7 +126,11 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                     &target.seq,
                     qseq,
                     &config.matrix,
-                    &SearchParams { step: config.step, hsp: config.hsp },
+                    &SearchParams {
+                        step: config.step,
+                        hsp: config.hsp,
+                        transitions: config.transitions,
+                    },
                 );
                 if hsps.is_empty() {
                     continue;

@@ -50,23 +50,23 @@ delta, per-side-only signatures, and whether the PLAN.md release gate passes.
 Current state on the `pseudocat.fa × pseudopig.fa` fixture (upstream's own
 test data):
 
-| Metric                                      | Before masking | After masking |
-|---------------------------------------------|---------------:|--------------:|
-| Upstream blocks                             | 14             | 14            |
-| lastz-gxy blocks                            | 31             | **10**        |
-| Shared                                      | 7              | 7             |
-| **Jaccard**                                 | 0.22           | **0.44**      |
-| Score delta on shared blocks (median / max) | 0 / 0          | 0 / 0         |
-| Aligned bp delta                            | +111 %         | **+3.1 %**    |
-| Release gate                                | FAIL           | FAIL          |
+| Metric                                      | Before masking | + masking     | + transitions |
+|---------------------------------------------|---------------:|--------------:|--------------:|
+| Upstream blocks                             | 14             | 14            | 14            |
+| lastz-gxy blocks                            | 31             | 10            | 42            |
+| Shared                                      | 7              | 7             | **14 of 14**  |
+| **Jaccard**                                 | 0.22           | 0.44          | **0.67**      |
+| Score delta on shared blocks (median / max) | 0 / 0          | 0 / 0         | 0 / 0         |
+| Aligned bp delta                            | +111 %         | +3.1 %        | +334 %        |
+| Release gate                                | FAIL           | FAIL          | FAIL          |
 
 The zero score-delta on shared blocks says the gapped DP matches upstream
-bit-for-bit *when we agree on the block boundary*. Respecting soft-masking
-(lowercase `acgt` in the input FASTA; defaults on) halved the aligned-bp
-over-count and cut spurious blocks from 24 → 3. Remaining gap: seven
-upstream blocks we don't emit, six of them on the minus strand — pointing
-at chain / tweener / dynamic-masking behavior, not scoring. Closing those
-is what moves Jaccard from 0.44 toward the 0.99 release gate.
+bit-for-bit *when we agree on the block boundary*. After adding transitions
+(`--transition` in upstream) we now share **every** upstream block. The
+remaining gap is the 28 extra blocks we emit that upstream does not —
+mostly minus-strand, low-identity repeats that upstream presumably filters
+via dynamic masking (`--masking=N`) or entropy-based post-filters. That's
+the next lever toward the 0.99 release gate.
 
 ## Benchmarks
 

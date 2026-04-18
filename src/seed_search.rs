@@ -1,11 +1,11 @@
 //! Query-side seed iteration that drives HSP production.
 //!
 //! Given a reference `PosTable` and a query `PackedSeq`, this module walks
-//! every query window at the configured stride, looks up the seed word, and
-//! for each reference hit decides — via `DiagHash` — whether to extend into
-//! an ungapped HSP. The resulting HSPs are returned in the order they were
-//! emitted (which, because hits flow in query-order, is also
-//! diagonal-grouped).
+//! every query window at the configured stride, looks up the seed word
+//! (plus optional transition variants), and for each reference hit
+//! decides — via `DiagHash` — whether to extend into an ungapped HSP.
+//! The resulting HSPs are returned in the order they were emitted (which,
+//! because hits flow in query-order, is also diagonal-grouped).
 
 use crate::diag_hash::DiagHash;
 use crate::hsp::{extend_hit, Hsp, HspParams};
@@ -19,6 +19,10 @@ use crate::sequences::PackedSeq;
 pub struct SearchParams {
     pub step: usize,
     pub hsp: HspParams,
+    /// Number of transition substitutions tolerated per seed. `0` is
+    /// upstream's `--notransition`; `1` is the default (`--transition`);
+    /// `2` is `--transition=2`.
+    pub transitions: u8,
 }
 
 impl Default for SearchParams {
@@ -26,6 +30,7 @@ impl Default for SearchParams {
         Self {
             step: 1,
             hsp: HspParams::default(),
+            transitions: 1,
         }
     }
 }
@@ -41,23 +46,57 @@ pub fn search(
 ) -> Vec<Hsp> {
     let pattern = table.pattern();
     let seed_len = pattern.len() as u32;
+    let weight = pattern.weight();
     let extractor = SeedExtractor::new(pattern);
 
     let mut out = Vec::new();
     let mut diag = DiagHash::new();
 
+    // Precompute the bit offsets of each care position within the packed
+    // seed word. Position 0 is the leftmost care bit (most significant in
+    // the word). `shift[i]` is the bit offset of care-position `i`.
+    let shifts: Vec<u32> = (0..weight).map(|i| 2 * (weight as u32 - 1 - i as u32)).collect();
+
+    // Collect lookups for the base word and all 1-transition variants.
+    // Transition: A↔G (codes 0↔2), C↔T (codes 1↔3). XOR with 0b10 at a
+    // care-position's bit pair toggles the transition. Two transitions
+    // require nested expansion; we cap at `transitions=2` per upstream.
+    let variants_cap = match params.transitions {
+        0 => 1,
+        1 => 1 + weight,
+        _ => 1 + weight + weight * weight.saturating_sub(1) / 2,
+    };
+    let mut variants: Vec<u64> = Vec::with_capacity(variants_cap);
+
     for (q_pos, word) in extractor.iter_with_stride(query, params.step) {
-        let hits = table.lookup(word);
-        for &t_pos in hits {
-            if !diag.admit(t_pos, q_pos) {
-                continue;
+        variants.clear();
+        variants.push(word);
+        if params.transitions >= 1 {
+            for &s in &shifts {
+                variants.push(word ^ (0b10u64 << s));
             }
-            let Some(hsp) = extend_hit(target, query, matrix, &params.hsp, t_pos, q_pos, seed_len)
-            else {
-                continue;
-            };
-            diag.mark_covered(hsp.t_end(), hsp.q_end());
-            out.push(hsp);
+        }
+        if params.transitions >= 2 {
+            for i in 0..shifts.len() {
+                for j in (i + 1)..shifts.len() {
+                    variants.push(word ^ (0b10u64 << shifts[i]) ^ (0b10u64 << shifts[j]));
+                }
+            }
+        }
+
+        for &v in &variants {
+            let hits = table.lookup(v);
+            for &t_pos in hits {
+                if !diag.admit(t_pos, q_pos) {
+                    continue;
+                }
+                let Some(hsp) = extend_hit(target, query, matrix, &params.hsp, t_pos, q_pos, seed_len)
+                else {
+                    continue;
+                };
+                diag.mark_covered(hsp.t_end(), hsp.q_end());
+                out.push(hsp);
+            }
         }
     }
 
@@ -65,9 +104,6 @@ pub fn search(
     // chaining. We sort here so the output is stable regardless of the
     // interior hit order.
     out.sort_unstable_by_key(|h| (h.diagonal(), h.t_start));
-    // A single extended HSP may have consumed multiple seed hits that the
-    // diag-hash admitted before it was written out (since admission happens
-    // before extension). Drop exact duplicates.
     out.dedup();
     out
 }
@@ -97,6 +133,7 @@ mod tests {
             &SearchParams {
                 step: 1,
                 hsp: HspParams { x_drop: 500, hsp_threshold: 1000 },
+                transitions: 0,
             },
         );
         assert_eq!(hsps.len(), 1, "expected one HSP, got {hsps:#?}");
@@ -104,6 +141,43 @@ mod tests {
         assert_eq!(h.t_start, 5);
         assert_eq!(h.q_start, 0);
         assert_eq!(h.length, 16);
+    }
+
+    #[test]
+    fn transition_variants_find_off_by_one_hits() {
+        // Target has ACGTA. Query has ACATA (G→A is a transition). With
+        // --notransition the 5-mer seed should miss; with --transition
+        // (default) it should hit.
+        let target = PackedSeq::from_ascii(b"AAAAACGTAAAAA");
+        let query = PackedSeq::from_ascii(b"ACATA");
+        let pat = SeedPattern::solid(5);
+        let table = PosTable::build(&target, &pat, 1);
+
+        let no_trans = search(
+            &table,
+            &target,
+            &query,
+            &m(),
+            &SearchParams {
+                step: 1,
+                hsp: HspParams { x_drop: 500, hsp_threshold: 50 },
+                transitions: 0,
+            },
+        );
+        assert!(no_trans.is_empty(), "unexpected hits without transitions");
+
+        let with_trans = search(
+            &table,
+            &target,
+            &query,
+            &m(),
+            &SearchParams {
+                step: 1,
+                hsp: HspParams { x_drop: 500, hsp_threshold: 50 },
+                transitions: 1,
+            },
+        );
+        assert!(!with_trans.is_empty(), "expected at least one transition hit");
     }
 
     #[test]
@@ -120,6 +194,7 @@ mod tests {
             &SearchParams {
                 step: 1,
                 hsp: HspParams { x_drop: 100, hsp_threshold: 100 },
+                transitions: 0,
             },
         );
         assert!(hsps.is_empty());
@@ -142,6 +217,7 @@ mod tests {
             &SearchParams {
                 step: 1,
                 hsp: HspParams { x_drop: 500, hsp_threshold: 500 },
+                transitions: 0,
             },
         );
         let unique_diagonals: std::collections::BTreeSet<_> =
@@ -173,6 +249,7 @@ mod tests {
             &SearchParams {
                 step: 1,
                 hsp: HspParams { x_drop: 500, hsp_threshold: 500 },
+                transitions: 0,
             },
         );
         let diagonals: std::collections::BTreeSet<_> =
