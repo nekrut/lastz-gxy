@@ -52,13 +52,16 @@ fn main() -> ExitCode {
 
     let report = compare(&baseline, &test);
 
-    println!("baseline: {} blocks ({})", report.left_blocks, cli.baseline.display());
-    println!("test:     {} blocks ({})", report.right_blocks, cli.test.display());
-    println!("shared:   {}", report.intersection);
-    println!("union:    {}", report.union_size);
-    println!("Jaccard:  {:.6}", report.jaccard);
+    println!("baseline:  {} blocks ({})", report.left_blocks, cli.baseline.display());
+    println!("test:      {} blocks ({})", report.right_blocks, cli.test.display());
+    println!("shared:    {}", report.intersection);
+    println!("union:     {}", report.union_size);
     println!();
-    println!("score delta (test - baseline, over shared blocks):");
+    println!("RECALL:    {:.4}  (baseline blocks present in test)", report.recall);
+    println!("PRECISION: {:.4}  (test blocks present in baseline)", report.precision);
+    println!("Jaccard:   {:.4}  (shared / union — legacy single-number view)", report.jaccard);
+    println!();
+    println!("score delta on shared blocks (test - baseline):");
     println!("  median:  {}", report.score_delta_median);
     println!("  max|Δ|:  {}", report.score_delta_max_abs);
     println!("  mean:    {:.3}", report.score_delta_mean);
@@ -92,7 +95,7 @@ fn main() -> ExitCode {
     println!();
     let pass = report.passes_release_gate();
     println!(
-        "release gate (Jaccard≥0.99, median Δ=0, max|Δ|≤1, |bp Δ|≤0.1%): {}",
+        "release gate (recall=1.0, median Δ=0, max|Δ|≤1): {}",
         if pass { "PASS" } else { "FAIL" }
     );
 

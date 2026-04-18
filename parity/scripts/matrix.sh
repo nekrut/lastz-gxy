@@ -23,10 +23,10 @@ PAIRS=(
     "pseudocat.fa|pseudopig.fa|cat vs pig (multi-contig cross)"
 )
 
-printf '%-40s %6s %6s %6s %10s %10s %6s\n' \
-    "fixture" "base" "gxy" "shared" "Jaccard" "bpΔ" "gate"
-printf '%-40s %6s %6s %6s %10s %10s %6s\n' \
-    "---" "---" "---" "---" "---" "---" "---"
+printf '%-40s %6s %6s %6s %8s %8s %8s %6s\n' \
+    "fixture" "base" "gxy" "shared" "RECALL" "PREC" "bpΔ" "gate"
+printf '%-40s %6s %6s %6s %8s %8s %8s %6s\n' \
+    "---" "---" "---" "---" "---" "---" "---" "---"
 
 for row in "${PAIRS[@]}"; do
     IFS='|' read -r target query label <<< "$row"
@@ -36,9 +36,10 @@ for row in "${PAIRS[@]}"; do
     base=$(echo "$report" | grep -E '^baseline:' | awk '{print $2}')
     gxy=$(echo "$report" | grep -E '^test:' | awk '{print $2}')
     shared=$(echo "$report" | grep -E '^shared:' | awk '{print $2}')
-    jaccard=$(echo "$report" | grep -E '^Jaccard:' | awk '{print $2}')
+    recall=$(echo "$report" | grep -E '^RECALL:' | awk '{print $2}')
+    precision=$(echo "$report" | grep -E '^PRECISION:' | awk '{print $2}')
     bpdelta=$(echo "$report" | grep -E '^\s*Δ:' | awk '{print $2}')
     gate=$(echo "$report" | grep -E '^release gate' | sed 's/.*: //')
-    printf '%-40s %6s %6s %6s %10s %10s %6s\n' \
-        "$label" "$base" "$gxy" "$shared" "$jaccard" "$bpdelta" "$gate"
+    printf '%-40s %6s %6s %6s %8s %8s %8s %6s\n' \
+        "$label" "$base" "$gxy" "$shared" "$recall" "$precision" "$bpdelta" "$gate"
 done
