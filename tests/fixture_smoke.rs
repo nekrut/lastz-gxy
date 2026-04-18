@@ -3,7 +3,7 @@
 //! pipeline (sequences → pos_table → seed_search → HSP → chain → anchor →
 //! gapped_extend → tweener → output).
 
-use lastz_gxy::driver::{run, Config, StrandSpec};
+use lastz_gxy::driver::{run, ChunkConfig, Config, StrandSpec};
 use lastz_gxy::gapped_extend::GappedParams;
 use lastz_gxy::hsp::HspParams;
 use lastz_gxy::output::Strand;
@@ -151,4 +151,86 @@ fn minus_strand_with_tweener_and_gapped() {
             "records not sorted by t_start: {pair:#?}"
         );
     }
+}
+
+/// Within-target chunking must produce the same record set as non-chunked
+/// execution, block-for-block, modulo the dedup pass the driver already
+/// runs on overlapping halo regions. Uses a target long enough that small
+/// chunk/halo values force multiple chunks.
+#[test]
+fn chunking_preserves_record_set() {
+    // A 2 kbp target with two embedded homology blocks. Chunking with
+    // chunk_size=600, halo=200 produces 4 chunks covering 600 bp each,
+    // with halo overlaps forcing at least one duplicate emission that the
+    // driver must dedup.
+    let payload1: &[u8] = b"GATTACACATGGCATGTCGACCCCCCCCCCCC";
+    let payload2: &[u8] = b"AGCTAGCTAGCTAGCTAGCGCATCATCATGCA";
+
+    let filler = |seed: u64, n: usize| -> Vec<u8> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                b"ACGT"[((s >> 33) & 3) as usize]
+            })
+            .collect()
+    };
+
+    let mut target_bytes = filler(1, 400);
+    target_bytes.extend_from_slice(payload1);
+    target_bytes.extend(filler(2, 800));
+    target_bytes.extend_from_slice(payload2);
+    target_bytes.extend(filler(3, 400));
+
+    let mut query_bytes = filler(4, 100);
+    query_bytes.extend_from_slice(payload1);
+    query_bytes.extend(filler(5, 200));
+    query_bytes.extend_from_slice(payload2);
+    query_bytes.extend(filler(6, 100));
+
+    let targets = vec![Sequence {
+        name: "t".into(),
+        seq: PackedSeq::from_ascii(&target_bytes),
+    }];
+    let queries = vec![Sequence {
+        name: "q".into(),
+        seq: PackedSeq::from_ascii(&query_bytes),
+    }];
+
+    let base_cfg = Config {
+        pattern: SeedPattern::solid(12),
+        strand: StrandSpec::Plus,
+        hsp: HspParams { x_drop: 910, hsp_threshold: 500 },
+        gapped: GappedParams { y_drop: 3_000, gapped_threshold: 500 },
+        gapped_enabled: true,
+        transitions: 0,
+        ..Config::default()
+    };
+
+    let non_chunked = run(&targets, &queries, &base_cfg);
+    let chunked_cfg = Config {
+        chunk: ChunkConfig { primary_bp: 600, halo_bp: 200 },
+        ..base_cfg
+    };
+    let chunked = run(&targets, &queries, &chunked_cfg);
+
+    // Both record sets should cover the same target regions, strands, and
+    // spans. The chunked path may reorder slightly; compare signatures.
+    type Sig = (u32, u32, u32, u32, Strand);
+    let mut a: Vec<Sig> = non_chunked
+        .iter()
+        .map(|r| (r.t_start, r.t_span, r.q_start, r.q_span, r.query_strand))
+        .collect();
+    let mut b: Vec<Sig> = chunked
+        .iter()
+        .map(|r| (r.t_start, r.t_span, r.q_start, r.q_span, r.query_strand))
+        .collect();
+    a.sort();
+    b.sort();
+    assert_eq!(
+        a, b,
+        "chunked record set differs from non-chunked:\nnon-chunked={non_chunked:#?}\nchunked={chunked:#?}"
+    );
+    assert!(!a.is_empty(), "test fixture produced no records");
 }

@@ -225,6 +225,7 @@ mod tests {
             anchor_window: 31,
             transitions: 1,
             entropy_threshold: None,
+            chunk: crate::driver::ChunkConfig::default(),
             tweener: None,
         }
     }

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-use crate::driver::{Config, StrandSpec};
+use crate::driver::{ChunkConfig, Config, StrandSpec};
 use crate::gapped_extend::GappedParams;
 use crate::hsp::HspParams;
 use crate::scoring::ScoringMatrix;
@@ -122,6 +122,21 @@ pub struct Cli {
     #[arg(long)]
     pub entropy_threshold: Option<i32>,
 
+    /// Within-target chunk size in base pairs. When non-zero, target
+    /// sequences longer than `chunk_size + halo` are split into
+    /// overlapping chunks of this primary-region size, enabling rayon
+    /// parallelism beyond the default `(target × strand)` granularity.
+    /// `0` (default) disables chunking.
+    #[arg(long, default_value_t = 0)]
+    pub chunk_size: u32,
+
+    /// Halo (overlap) in base pairs on each side of every primary chunk
+    /// region. Must be ≥ the longest alignment that crosses a chunk
+    /// boundary, or such alignments will be truncated by y-drop. Typical
+    /// value for HOXD70 defaults: 50000.
+    #[arg(long, default_value_t = 50_000)]
+    pub halo: u32,
+
     /// Anchor window width (columns) used to pick the gapped-extension
     /// start position inside each HSP.
     #[arg(long, default_value_t = 31)]
@@ -199,6 +214,10 @@ pub fn build_config(cli: &Cli) -> anyhow::Result<Config> {
         anchor_window: cli.anchor_window.max(1),
         transitions,
         entropy_threshold,
+        chunk: ChunkConfig {
+            primary_bp: cli.chunk_size,
+            halo_bp: cli.halo,
+        },
         tweener,
     })
 }

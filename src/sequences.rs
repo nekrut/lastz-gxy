@@ -147,6 +147,32 @@ impl PackedSeq {
             .collect()
     }
 
+    /// Copy `self[start..end]` into a fresh `PackedSeq`, preserving code,
+    /// validity, and mask bits. Used by within-target chunking so each
+    /// chunk owns a standalone buffer with chunk-local coordinates.
+    pub fn slice_to_new(&self, start: usize, end: usize) -> Self {
+        assert!(start <= end && end <= self.len, "slice_to_new out of range");
+        let mut out = Self::with_capacity(end - start);
+        for i in start..end {
+            // Respect validity explicitly so the destination pushes an `N`
+            // where the source had one (which clears both the valid and
+            // mask bits in a single push).
+            if !self.is_valid(i) {
+                out.push_ascii(b'N');
+            } else {
+                let code = self.code(i);
+                let byte = decode_base(code);
+                let byte = if self.is_masked(i) {
+                    byte.to_ascii_lowercase()
+                } else {
+                    byte
+                };
+                out.push_ascii(byte);
+            }
+        }
+        out
+    }
+
     /// Reverse-complement into a new `PackedSeq`. The `mask` bitset is
     /// carried over so position `len-1-i` in the output is masked iff
     /// position `i` in the input was masked.
@@ -322,6 +348,19 @@ mod tests {
         for i in 0..packed.len() {
             assert!(!packed.is_masked(i));
         }
+    }
+
+    #[test]
+    fn slice_to_new_preserves_codes_validity_and_mask() {
+        let s = PackedSeq::from_ascii(b"ACgtNACGT");
+        let sl = s.slice_to_new(2, 7); // "gtNAC"
+        assert_eq!(sl.len(), 5);
+        assert_eq!(sl.to_ascii(), b"GTNAC");
+        assert!(sl.is_masked(0)); // 'g' → mask carried
+        assert!(sl.is_masked(1)); // 't' → mask carried
+        assert!(!sl.is_valid(2)); // 'N' → invalid carried
+        assert!(!sl.is_masked(3)); // 'A' → unmasked
+        assert!(!sl.is_masked(4)); // 'C' → unmasked
     }
 
     #[test]

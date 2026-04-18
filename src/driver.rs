@@ -25,7 +25,7 @@ use crate::pos_table::PosTable;
 use crate::scoring::ScoringMatrix;
 use crate::seed_search::{search, SearchParams};
 use crate::seeds::SeedPattern;
-use crate::sequences::Sequence;
+use crate::sequences::{PackedSeq, Sequence};
 use crate::tweener::{interpolate, TweenerConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,12 @@ pub struct Config {
     /// Transition substitutions tolerated per seed (upstream
     /// `--transition`/`--notransition`; 0 = none, 1 = one, 2 = two).
     pub transitions: u8,
+    /// Within-target chunking. When the target's length exceeds
+    /// `chunk.primary_bp`, it is split into overlapping chunks of that
+    /// size plus `chunk.halo_bp` of overlap on each side, and the
+    /// pipeline is rayon-parallelised over `(chunk × query × strand)`
+    /// triples. `primary_bp = 0` (the default) disables chunking.
+    pub chunk: ChunkConfig,
     /// When `Some`, apply KegAlign's Shannon-entropy gate to every HSP:
     /// drop HSPs whose target-slice entropy, scaled against the raw
     /// score, is below this threshold. Opt-in via `--entropy`.
@@ -98,23 +104,117 @@ impl Default for Config {
             anchor_window: 31,
             transitions: 1,
             entropy_threshold: None,
+            chunk: ChunkConfig::default(),
             tweener: None,
         }
     }
+}
+
+/// Within-target chunking configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkConfig {
+    /// Primary region length per chunk. `0` disables chunking entirely —
+    /// the whole target is one chunk.
+    pub primary_bp: u32,
+    /// Overlap on each side of each primary region. Must be large enough
+    /// to contain any single alignment that starts near a chunk boundary,
+    /// otherwise alignments crossing boundaries will be truncated by
+    /// `y_drop`. Typical value: `~50_000` bp for HOXD70 defaults.
+    pub halo_bp: u32,
+}
+
+impl Default for ChunkConfig {
+    fn default() -> Self {
+        Self { primary_bp: 0, halo_bp: 0 }
+    }
+}
+
+/// One target chunk produced by `chunk_target`. Coordinates in `seq` are
+/// chunk-local; `global_start` maps chunk-local position 0 to its index
+/// in the parent target sequence. HSPs emitted while aligning against
+/// this chunk need `global_start` added to their `t_start`.
+#[derive(Debug, Clone)]
+struct TargetChunk {
+    parent_index: usize,
+    global_start: u32,
+    seq: PackedSeq,
+    /// Chunk-local coordinate cut-off beyond which an HSP's anchor is
+    /// considered to live in the next chunk's primary region and should
+    /// be suppressed. Equal to `primary_bp + halo_bp` for non-final
+    /// chunks; `seq.len()` for the final chunk (so nothing is dropped).
+    primary_end_local: u32,
+    /// Chunk-local offset where this chunk's primary region starts.
+    /// HSPs anchored before this offset live in the previous chunk's
+    /// primary region and should be suppressed to avoid double-emission.
+    /// Equal to `halo_bp` for non-first chunks; `0` for the first.
+    primary_start_local: u32,
+}
+
+/// Split a target sequence into overlapping chunks. Returns a single
+/// whole-sequence chunk when `cfg.primary_bp == 0` or the target is
+/// shorter than one primary-plus-halo window.
+fn chunk_target(
+    parent_index: usize,
+    target: &Sequence,
+    cfg: &ChunkConfig,
+) -> Vec<TargetChunk> {
+    let t_len = target.seq.len() as u32;
+    if cfg.primary_bp == 0 || t_len <= cfg.primary_bp + cfg.halo_bp {
+        return vec![TargetChunk {
+            parent_index,
+            global_start: 0,
+            seq: target.seq.clone(),
+            primary_start_local: 0,
+            primary_end_local: t_len,
+        }];
+    }
+
+    let mut chunks = Vec::new();
+    let mut primary_start = 0u32;
+    while primary_start < t_len {
+        let primary_end = (primary_start + cfg.primary_bp).min(t_len);
+        let chunk_lo = primary_start.saturating_sub(cfg.halo_bp);
+        let chunk_hi = (primary_end + cfg.halo_bp).min(t_len);
+        let seq = target.seq.slice_to_new(chunk_lo as usize, chunk_hi as usize);
+        let primary_start_local = primary_start - chunk_lo;
+        let primary_end_local = primary_end - chunk_lo;
+        chunks.push(TargetChunk {
+            parent_index,
+            global_start: chunk_lo,
+            seq,
+            primary_start_local,
+            primary_end_local,
+        });
+        if primary_end == t_len {
+            break;
+        }
+        primary_start = primary_end;
+    }
+    chunks
 }
 
 type PerGroup = (usize, usize, Strand, Vec<Record>);
 
 /// Run the full pipeline and return all records.
 pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<Record> {
+    // Build the chunk list up front so we can parallelise over it with
+    // rayon. When chunking is disabled this is a single chunk per target.
+    let chunks: Vec<TargetChunk> = targets
+        .iter()
+        .enumerate()
+        .flat_map(|(ti, t)| chunk_target(ti, t, &config.chunk))
+        .collect();
+
     let per_group: Mutex<Vec<PerGroup>> = Mutex::new(Vec::new());
 
-    targets.par_iter().enumerate().for_each(|(ti, target)| {
-        let mut table = PosTable::build(&target.seq, &config.pattern, config.step);
+    chunks.par_iter().for_each(|chunk| {
+        let target = &targets[chunk.parent_index];
+        let mut table = PosTable::build(&chunk.seq, &config.pattern, config.step);
         if config.max_word_count > 0 {
             table.prune_hot_words(config.max_word_count);
         }
-        let target_ascii = target.seq.to_ascii();
+        let chunk_ascii = chunk.seq.to_ascii();
+        let target_len = target.seq.len() as u32;
 
         for (qi, query) in queries.iter().enumerate() {
             let plus_ascii = query.seq.to_ascii();
@@ -128,7 +228,7 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                 };
                 let hsps = search(
                     &table,
-                    &target.seq,
+                    &chunk.seq,
                     qseq,
                     &config.matrix,
                     &SearchParams {
@@ -142,20 +242,31 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                     continue;
                 }
 
-                let kept = if config.chain_enabled {
-                    best_chain(&hsps)
-                } else {
-                    hsps
-                };
+                // Drop HSPs whose anchor (chunk-local `t_start`) lives in
+                // a neighbouring chunk's primary region. The surviving
+                // chunk will still emit this HSP from its own primary-
+                // region anchor, so dropping here avoids double-counting
+                // without losing alignments.
+                let mut kept: Vec<Hsp> = hsps
+                    .into_iter()
+                    .filter(|h| {
+                        h.t_start >= chunk.primary_start_local
+                            && h.t_start < chunk.primary_end_local
+                    })
+                    .collect();
+
+                if config.chain_enabled {
+                    kept = best_chain(&kept);
+                }
 
                 let mut recs: Vec<Record> = Vec::with_capacity(kept.len());
                 for hsp in kept {
                     let record = if config.gapped_enabled {
                         build_gapped_record(
                             hsp,
-                            &target.seq,
+                            &chunk.seq,
                             qseq,
-                            &target_ascii,
+                            &chunk_ascii,
                             qascii,
                             &config.matrix,
                             &config.gapped,
@@ -163,15 +274,19 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                             target,
                             query,
                             strand,
+                            chunk.global_start,
+                            target_len,
                         )
                     } else {
                         Some(build_ungapped_record(
                             hsp,
-                            &target_ascii,
+                            &chunk_ascii,
                             qascii,
                             target,
                             query,
                             strand,
+                            chunk.global_start,
+                            target_len,
                         ))
                     };
                     if let Some(r) = record {
@@ -183,7 +298,11 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                     interpolate(
                         recs,
                         target,
-                        &target_ascii,
+                        // tweener re-scans inter-chain gaps against the
+                        // full target / query (not the chunk), because
+                        // gaps between chain members can cross chunk
+                        // boundaries. Pass full sequences + ASCII.
+                        &target.seq.to_ascii(),
                         query,
                         qseq,
                         qascii,
@@ -197,7 +316,10 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                 };
 
                 if !recs.is_empty() {
-                    per_group.lock().unwrap().push((ti, qi, strand, recs));
+                    per_group
+                        .lock()
+                        .unwrap()
+                        .push((chunk.parent_index, qi, strand, recs));
                 }
             }
         }
@@ -229,8 +351,8 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
 #[allow(clippy::too_many_arguments)]
 fn build_gapped_record(
     hsp: Hsp,
-    target_seq: &crate::sequences::PackedSeq,
-    query_seq: &crate::sequences::PackedSeq,
+    target_seq: &PackedSeq,
+    query_seq: &PackedSeq,
     target_ascii: &[u8],
     query_ascii: &[u8],
     matrix: &ScoringMatrix,
@@ -239,6 +361,11 @@ fn build_gapped_record(
     target: &Sequence,
     query: &Sequence,
     strand: Strand,
+    // Chunk-local → global offset on the target axis; 0 when chunking
+    // disabled. `target_len` is the parent target length (distinct from
+    // `target_seq.len()` when target_seq is a chunk).
+    chunk_global_start: u32,
+    target_len: u32,
 ) -> Option<Record> {
     let anchor = choose_anchor(hsp, target_seq, query_seq, matrix, anchor_window);
     let aln = gapped_extend(anchor, target_seq, query_seq, matrix, params)?;
@@ -248,11 +375,11 @@ fn build_gapped_record(
 
     Some(Record {
         target_name: target.name.clone(),
-        target_len: target.seq.len() as u32,
+        target_len,
         query_name: query.name.clone(),
         query_len: query.seq.len() as u32,
         query_strand: strand,
-        t_start: aln.t_start,
+        t_start: aln.t_start + chunk_global_start,
         q_start: aln.q_start,
         t_span: aln.t_len,
         q_span: aln.q_len,
@@ -263,6 +390,7 @@ fn build_gapped_record(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_ungapped_record(
     hsp: Hsp,
     target_ascii: &[u8],
@@ -270,6 +398,8 @@ fn build_ungapped_record(
     target: &Sequence,
     query: &Sequence,
     strand: Strand,
+    chunk_global_start: u32,
+    target_len: u32,
 ) -> Record {
     let t0 = hsp.t_start as usize;
     let t1 = t0 + hsp.length as usize;
@@ -279,11 +409,11 @@ fn build_ungapped_record(
     script.push(EditOp::Match, hsp.length);
     Record {
         target_name: target.name.clone(),
-        target_len: target.seq.len() as u32,
+        target_len,
         query_name: query.name.clone(),
         query_len: query.seq.len() as u32,
         query_strand: strand,
-        t_start: hsp.t_start,
+        t_start: hsp.t_start + chunk_global_start,
         q_start: hsp.q_start,
         t_span: hsp.length,
         q_span: hsp.length,

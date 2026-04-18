@@ -30,6 +30,29 @@ UPSTREAM_BIN="${LASTZ_UPSTREAM_BIN:-$ROOT/parity/upstream/bin/lastz}"
 GXY_BIN="${LASTZ_GXY_BIN:-$ROOT/target/release/lastz-gxy}"
 COMPARE_BIN="${GXY_COMPARE_BIN:-$ROOT/target/release/gxy-compare}"
 
+# Split EXTRA_FLAGS into (both) and (gxy-only). Any flag starting with
+# `--chunk-size`, `--halo`, `--entropy`, `--inner`, or `--anchor-window` is
+# a lastz-gxy extension that upstream doesn't understand — route those to
+# gxy only. Everything else goes to both.
+UPSTREAM_FLAGS=()
+GXY_FLAGS=()
+i=0
+while [[ $i -lt ${#EXTRA_FLAGS[@]} ]]; do
+    f="${EXTRA_FLAGS[$i]}"
+    case "$f" in
+        --chunk-size|--halo|--entropy-threshold|--inner-seed|--anchor-window)
+            GXY_FLAGS+=("$f" "${EXTRA_FLAGS[$((i+1))]}")
+            i=$((i+2)); continue ;;
+        --entropy|--inner)
+            GXY_FLAGS+=("$f")
+            i=$((i+1)); continue ;;
+        *)
+            UPSTREAM_FLAGS+=("$f")
+            GXY_FLAGS+=("$f")
+            i=$((i+1)); continue ;;
+    esac
+done
+
 if [[ ! -x "$UPSTREAM_BIN" ]]; then
     echo "upstream binary not found: $UPSTREAM_BIN" >&2
     echo "build it first:  parity/scripts/build-upstream.sh" >&2
@@ -51,10 +74,10 @@ UP_MAF="$OUT_DIR/$tag.upstream.maf"
 GXY_MAF="$OUT_DIR/$tag.gxy.maf"
 
 echo "==> running upstream lastz"
-"$UPSTREAM_BIN" "$TARGET" "$QUERY" --format=maf "${EXTRA_FLAGS[@]}" > "$UP_MAF"
+"$UPSTREAM_BIN" "$TARGET" "$QUERY" --format=maf "${UPSTREAM_FLAGS[@]}" > "$UP_MAF"
 
 echo "==> running lastz-gxy"
-"$GXY_BIN" "$TARGET" "$QUERY" --format maf "${EXTRA_FLAGS[@]}" > "$GXY_MAF"
+"$GXY_BIN" "$TARGET" "$QUERY" --format maf "${GXY_FLAGS[@]}" > "$GXY_MAF"
 
 echo "==> comparing"
 if [[ "${ENFORCE_GATE:-0}" = "1" ]]; then

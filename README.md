@@ -9,6 +9,19 @@ the speed comes from parallelism, cache-friendly data structures, SIMD on the
 CPU hot-path, and a portable GPU compute path for seed+HSP — not from relaxing
 the alignment model.
 
+## Parallelism
+
+- Default: rayon work-stealing over `(target, strand)` pairs — sufficient
+  for multi-chromosome workloads.
+- `--chunk-size N --halo H`: within-target chunking for single-chrom
+  workloads. Splits each target sequence into overlapping chunks of size
+  `N` with a `H`-bp halo on each side; pipeline runs on every
+  `(chunk × strand × query)` triple in parallel. **Halo must be ≥ the
+  longest expected alignment**, or alignments crossing chunk boundaries
+  will be truncated (the gapped extension cannot see past the chunk's
+  halo window). Sensible starting values for HOXD70 mammalian alignment:
+  `--chunk-size 10000000 --halo 50000`.
+
 > Status: **Phase 3 in progress** — AVX2 SIMD HSP x-drop landed with a
 > proptest-enforced bit-exact parity gate against the scalar reference.
 > Full pipeline: seed → HSP (SIMD) → chain → anchor → gapped 3-state affine
