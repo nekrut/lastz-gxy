@@ -50,23 +50,24 @@ delta, per-side-only signatures, and whether the PLAN.md release gate passes.
 Current state on the `pseudocat.fa × pseudopig.fa` fixture (upstream's own
 test data):
 
-| Metric                                      | Before masking | + masking     | + transitions |
-|---------------------------------------------|---------------:|--------------:|--------------:|
-| Upstream blocks                             | 14             | 14            | 14            |
-| lastz-gxy blocks                            | 31             | 10            | 42            |
-| Shared                                      | 7              | 7             | **14 of 14**  |
-| **Jaccard**                                 | 0.22           | 0.44          | **0.67**      |
-| Score delta on shared blocks (median / max) | 0 / 0          | 0 / 0         | 0 / 0         |
-| Aligned bp delta                            | +111 %         | +3.1 %        | +334 %        |
-| Release gate                                | FAIL           | FAIL          | FAIL          |
+| Metric                                      | Base  | + mask | + trans | + dedup |
+|---------------------------------------------|------:|-------:|--------:|--------:|
+| Upstream blocks                             | 14    | 14     | 14      | 14      |
+| lastz-gxy blocks                            | 31    | 10     | 42      | **21**  |
+| Shared                                      | 7     | 7      | 14      | **14**  |
+| **Jaccard**                                 | 0.22  | 0.44   | 0.67    | **0.67**|
+| Score Δ on shared (median / max)            | 0 / 0 | 0 / 0  | 0 / 0   | 0 / 0   |
+| Aligned bp Δ                                | +111% | +3%    | +334%   | **+42%**|
+| Release gate                                | FAIL  | FAIL   | FAIL    | FAIL    |
 
 The zero score-delta on shared blocks says the gapped DP matches upstream
-bit-for-bit *when we agree on the block boundary*. After adding transitions
-(`--transition` in upstream) we now share **every** upstream block. The
-remaining gap is the 28 extra blocks we emit that upstream does not —
-mostly minus-strand, low-identity repeats that upstream presumably filters
-via dynamic masking (`--masking=N`) or entropy-based post-filters. That's
-the next lever toward the 0.99 release gate.
+bit-for-bit *when we agree on the block boundary*. After soft-masking,
+1-transition seeds, and driver-level deduplication of the same gapped
+alignment arrived at from multiple ungapped seed hits, we now share every
+upstream block while the over-alignment dropped from +334 % to +42 %.
+Remaining gap: seven cross-query paralog alignments (same cat region
+matching multiple pig contigs) that upstream's default-mode pipeline
+apparently filters — the next lever toward the 0.99 release gate.
 
 ## Benchmarks
 

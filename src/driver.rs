@@ -202,7 +202,19 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
 
     let mut out = Vec::new();
     for (_, _, _, mut recs) in grouped {
-        recs.sort_by_key(|r| (r.t_start, r.q_start));
+        recs.sort_by_key(|r| (r.t_start, r.q_start, r.t_span, r.q_span));
+        // Different ungapped HSPs on the same diagonal can extend to the
+        // same gapped alignment — happens especially with transitions
+        // enabled, since one homologous region produces many seed hits.
+        // Drop such duplicates based on span + coordinates. Scores
+        // necessarily match for duplicates since the DP is deterministic.
+        recs.dedup_by(|a, b| {
+            a.t_start == b.t_start
+                && a.q_start == b.q_start
+                && a.t_span == b.t_span
+                && a.q_span == b.q_span
+                && a.query_strand == b.query_strand
+        });
         out.extend(recs);
     }
     out
