@@ -241,26 +241,10 @@ fn extend_one_side(
     let mut x_from = vec![State::M; size];
     let mut y_from = vec![State::M; size];
 
-    // Translate `(i, j_global)` to a flat index inside the per-row
-    // band. Returns `None` when `j_global` lies outside row i's
-    // allocated slice — the caller treats that as `NEG_INF`.
-    let local_idx = |row_lo: &[usize], i: usize, j: usize| -> Option<usize> {
-        let lo = row_lo[i];
-        if j < lo {
-            return None;
-        }
-        let local = j - lo;
-        if local >= band_width {
-            return None;
-        }
-        Some(i * band_width + local)
-    };
-    let read = |arr: &[i32], row_lo: &[usize], i: usize, j: usize| -> i32 {
-        match local_idx(row_lo, i, j) {
-            Some(idx) => arr[idx],
-            None => NEG_INF,
-        }
-    };
+    // Per-cell bounds checks against the band are inlined into the
+    // DP inner loop. The check is a pair of `usize` comparisons
+    // against the hoisted `lo_prev` / `hi_prev_excl` and the current
+    // row's `lo_this`; see the loop body below.
 
     mm[0] = 0;
 
@@ -284,20 +268,44 @@ fn extend_one_side(
         // wide slice by construction.
         row_lo[i] = j_lo;
 
+        // Hoist per-row invariants out of the inner-cell loop. The
+        // index arithmetic inside the loop becomes `j - lo_this`
+        // instead of `j - row_lo[i]`, and the prev-row bounds reduce
+        // to compares against two locals (lo_prev, hi_prev_excl).
+        let lo_this = j_lo;
+        let lo_prev = if i >= 1 { row_lo[i - 1] } else { 0 };
+        let hi_prev_excl = lo_prev + band_width;
+        let base_this = i * band_width;
+        let base_prev = if i >= 1 { (i - 1) * band_width } else { 0 };
+
         for j in j_lo..=j_hi {
             if i == 0 && j == 0 {
                 continue;
             }
 
             let mut best = NEG_INF;
-            let here = i * band_width + (j - row_lo[i]);
+            let here = base_this + (j - lo_this);
+
+            // Saturating arithmetic is overkill — NEG_INF is
+            // `i32::MIN / 4`, so `NEG_INF - gap_open_ext` = ~-537M
+            // and cumulative subtraction over the whole extension
+            // (bounded by O(sequence_len)) never reaches `i32::MIN`.
+
+            // Read the three prev-row neighbours (`(i-1, j)` and
+            // `(i-1, j-1)`) with a single bounds check each, inlined
+            // from the old closure-based helper.
+            let prev_in_band = |j: usize| j >= lo_prev && j < hi_prev_excl;
 
             // X: gap in query (target advances, query does not). Requires i>=1.
             if i >= 1 {
-                let prev_m = read(&mm, &row_lo, i - 1, j);
-                let prev_x = read(&xx, &row_lo, i - 1, j);
-                let from_m = prev_m.saturating_sub(gap_open_ext);
-                let from_x = prev_x.saturating_sub(gap_ext);
+                let (prev_m, prev_x) = if prev_in_band(j) {
+                    let off = base_prev + (j - lo_prev);
+                    (mm[off], xx[off])
+                } else {
+                    (NEG_INF, NEG_INF)
+                };
+                let from_m = prev_m - gap_open_ext;
+                let from_x = prev_x - gap_ext;
                 let (v, from) = if from_m >= from_x {
                     (from_m, State::M)
                 } else {
@@ -312,10 +320,17 @@ fn extend_one_side(
 
             // Y: gap in target (query advances, target does not). Requires j>=1.
             if j >= 1 {
-                let prev_m = read(&mm, &row_lo, i, j - 1);
-                let prev_y = read(&yy, &row_lo, i, j - 1);
-                let from_m = prev_m.saturating_sub(gap_open_ext);
-                let from_y = prev_y.saturating_sub(gap_ext);
+                // In-current-row neighbour at (i, j-1). Always in band
+                // because j-1 >= lo_this (unless j == lo_this, which
+                // reads the cell below lo_this → NEG_INF).
+                let (prev_m, prev_y) = if j - 1 >= lo_this {
+                    let off = base_this + (j - 1 - lo_this);
+                    (mm[off], yy[off])
+                } else {
+                    (NEG_INF, NEG_INF)
+                };
+                let from_m = prev_m - gap_open_ext;
+                let from_y = prev_y - gap_ext;
                 let (v, from) = if from_m >= from_y {
                     (from_m, State::M)
                 } else {
@@ -331,9 +346,12 @@ fn extend_one_side(
             // M: match/mismatch column. Requires i>=1 && j>=1.
             if i >= 1 && j >= 1 {
                 let s = pair_score(target[i - 1], query[j - 1], matrix);
-                let from_m = read(&mm, &row_lo, i - 1, j - 1);
-                let from_x = read(&xx, &row_lo, i - 1, j - 1);
-                let from_y = read(&yy, &row_lo, i - 1, j - 1);
+                let (from_m, from_x, from_y) = if prev_in_band(j - 1) {
+                    let off = base_prev + (j - 1 - lo_prev);
+                    (mm[off], xx[off], yy[off])
+                } else {
+                    (NEG_INF, NEG_INF, NEG_INF)
+                };
                 let (prev, from) = if from_m >= from_x && from_m >= from_y {
                     (from_m, State::M)
                 } else if from_x >= from_y {
@@ -341,7 +359,7 @@ fn extend_one_side(
                 } else {
                     (from_y, State::Y)
                 };
-                let v = prev.saturating_add(s);
+                let v = prev + s;
                 mm[here] = v;
                 m_from[here] = from;
                 if v > best {
