@@ -259,8 +259,43 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                     kept = best_chain(&kept);
                 }
 
+                // Extend HSPs into gapped alignments, highest-scoring
+                // first, skipping HSPs whose anchor lands inside an
+                // already-extended alignment's (t, q) footprint. Many
+                // ungapped HSPs on nearby diagonals collapse to the
+                // same gapped alignment; without this check each one
+                // triggers its own full DP run. Upstream lastz does
+                // the equivalent per-query inside gapped_extend.c.
+                if config.gapped_enabled {
+                    kept.sort_unstable_by_key(|h| std::cmp::Reverse(h.score));
+                }
+
+                struct Covered {
+                    t_lo: u32,
+                    t_hi: u32,
+                    q_lo: u32,
+                    q_hi: u32,
+                }
+                let mut covered: Vec<Covered> = Vec::new();
+
                 let mut recs: Vec<Record> = Vec::with_capacity(kept.len());
                 for hsp in kept {
+                    // If this HSP's seed sits inside an already-emitted
+                    // alignment's (t, q) rectangle, skip it. The
+                    // previously-emitted alignment either encompassed
+                    // this HSP's true extension or produced the same
+                    // result via a nearby seed.
+                    if config.gapped_enabled
+                        && covered.iter().any(|c| {
+                            hsp.t_start >= c.t_lo
+                                && hsp.t_start < c.t_hi
+                                && hsp.q_start >= c.q_lo
+                                && hsp.q_start < c.q_hi
+                        })
+                    {
+                        continue;
+                    }
+
                     let record = if config.gapped_enabled {
                         build_gapped_record(
                             hsp,
@@ -290,6 +325,14 @@ pub fn run(targets: &[Sequence], queries: &[Sequence], config: &Config) -> Vec<R
                         ))
                     };
                     if let Some(r) = record {
+                        if config.gapped_enabled {
+                            covered.push(Covered {
+                                t_lo: r.t_start,
+                                t_hi: r.t_end(),
+                                q_lo: r.q_start,
+                                q_hi: r.q_end(),
+                            });
+                        }
                         recs.push(r);
                     }
                 }
