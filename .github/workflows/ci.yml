@@ -1,0 +1,181 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # Fast feedback: build + test the Rust code on every push.
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + build dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - run: cargo build --release
+      - run: cargo test --release
+      - run: cargo build --release --bin gxy-compare
+
+  # Parity gate: build pinned upstream lastz, run the synthetic matrix
+  # plus the chrM real-organism pair, fail if any release-gate row
+  # fails. Uses --enforce on each compare so a regression aborts the
+  # job rather than just printing FAIL.
+  parity:
+    name: parity matrix vs lastz 1.04.52
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install upstream lastz build deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Cache cargo + upstream lastz build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            parity/upstream
+          key: parity-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'parity/scripts/build-upstream.sh') }}
+          restore-keys: parity-${{ runner.os }}-
+
+      - name: Build upstream lastz 1.04.52
+        run: parity/scripts/build-upstream.sh
+
+      - name: Build lastz-gxy + gxy-compare
+        run: cargo build --release
+
+      - name: Synthetic-corpus parity matrix
+        run: parity/scripts/matrix.sh
+
+      - name: Synthetic-corpus parity gate (enforced)
+        # The matrix prints PASS/FAIL but doesn't exit non-zero. Re-run
+        # each compare with --enforce so a regression actually aborts CI.
+        run: |
+          set -euo pipefail
+          declare -a pairs=(
+            "parity/corpus/pseudocat.fa parity/corpus/pseudocat.fa"
+            "parity/corpus/pseudopig1.fa parity/corpus/pseudopig1.fa"
+            "parity/corpus/pseudocat.fa parity/corpus/pseudopig1.fa"
+            "parity/corpus/pseudocat.fa parity/corpus/pseudopig.fa"
+            "parity/corpus/sars_cov2.fa parity/corpus/sars_cov2.fa"
+            "parity/corpus/sars_cov2.fa parity/corpus/sars_cov1.fa"
+          )
+          for p in "${pairs[@]}"; do
+            ENFORCE_GATE=1 parity/scripts/compare.sh $p > /dev/null
+          done
+
+      - name: Fetch real chrM pair (NCBI mitochondria)
+        run: parity/scripts/fetch-genomes.sh chrM
+
+      - name: Real-chrM parity gate (enforced)
+        run: |
+          set -euo pipefail
+          ENFORCE_GATE=1 parity/scripts/compare.sh \
+            parity/corpus/real/hg38_chrM.fa \
+            parity/corpus/real/panTro_chrM.fa > /dev/null
+          ENFORCE_GATE=1 parity/scripts/compare.sh \
+            parity/corpus/real/hg38_chrM.fa \
+            parity/corpus/real/hg38_chrM.fa > /dev/null
+
+      - name: Wall-time (sars-cov-2 vs sars-cov-1, real virus pair)
+        # ~30 kbp each, large enough that the per-call overhead doesn't
+        # dominate. Three runs of each, report best of three.
+        #
+        # KNOWN: lastz-gxy is currently far slower than upstream on
+        # ≥30 kbp inputs because gapped_extend allocates the full
+        # (n+1) x (m+1) DP matrix per call (~21 GB for 30 kbp x 30 kbp).
+        # The banded DP only restricts which cells are written, not the
+        # allocation. Fix is tracked; this step is `continue-on-error`
+        # so CI stays green until then but the regression stays
+        # visible on every push.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          run_one() {
+            local cmd=$1
+            local start_ns end_ns
+            start_ns=$(date +%s%N)
+            bash -c "$cmd" > /dev/null
+            end_ns=$(date +%s%N)
+            awk -v s="$start_ns" -v e="$end_ns" 'BEGIN { printf "%.3f", (e - s) / 1e9 }'
+          }
+          best_of_three() {
+            local cmd=$1 best=999
+            for _ in 1 2 3; do
+              local s
+              s=$(run_one "$cmd")
+              best=$(awk -v s="$s" -v b="$best" 'BEGIN { print (s < b ? s : b) }')
+            done
+            echo "$best"
+          }
+          T="parity/corpus/sars_cov2.fa"
+          Q="parity/corpus/sars_cov1.fa"
+          UP=$(best_of_three "parity/upstream/bin/lastz $T $Q --format=maf")
+          GXY=$(best_of_three "target/release/lastz-gxy $T $Q --format maf")
+          RATIO=$(awk -v u="$UP" -v g="$GXY" 'BEGIN { printf "%.2f", u / g }')
+          printf "upstream  best-of-3 = %s s\n" "$UP"
+          printf "lastz-gxy best-of-3 = %s s\n" "$GXY"
+          printf "speedup           = %sx\n" "$RATIO"
+          {
+            echo "upstream=$UP"
+            echo "gxy=$GXY"
+            echo "ratio=$RATIO"
+          } >> "$GITHUB_OUTPUT"
+        id: walltime
+
+      - name: Append wall-time to job summary
+        if: always() && steps.walltime.outputs.upstream != ''
+        run: |
+          {
+            echo "## Wall-time (sars-cov-2 × sars-cov-1, best of 3)"
+            echo
+            echo "| binary    | seconds |"
+            echo "| --------- | ------: |"
+            echo "| upstream  | ${{ steps.walltime.outputs.upstream }} |"
+            echo "| lastz-gxy | ${{ steps.walltime.outputs.gxy }} |"
+            echo
+            echo "**lastz-gxy is ${{ steps.walltime.outputs.ratio }}× upstream's wall time** on this fixture."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Style + lint. Non-blocking for now (clippy on a fresh codebase tends
+  # to surface a hundred low-value nits) but visible.
+  lint:
+    name: clippy
+    runs-on: ubuntu-latest
+    needs: test
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: clippy-${{ runner.os }}-${{ hashFiles('Cargo.toml') }}
+      - run: cargo clippy --release --all-targets -- -D warnings

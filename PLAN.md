@@ -95,6 +95,20 @@ defaults), not a fixed constant, and should probably drop the strict
 expansion limit and rely purely on `y_drop` pruning. Revisit as part of
 the striped-SIMD rewrite.
 
+**Open perf bug (2026-04, discovered by CI wall-time bench).** The current
+banded gapped DP only restricts which cells get *written* per row; it
+still *allocates* the full `(n+1) × (m+1) × 6` cell matrix per call.
+For 30 kbp × 30 kbp inputs that's ~21 GB allocated and zeroed per
+extension, and ~23 extensions on the sars-cov-2 × sars-cov-1 fixture →
+the system thrashes for ~3 minutes vs upstream's ~0.16 s. The
+`gapped_extend/2 kbp_with_indel` criterion bench didn't catch it
+because at 4 M cells (~24 MB) the allocation is fast.
+
+Fix: allocate per-row banded slices of size `2 * band_radius + slack`
+(~700 cells) with per-row offsets, instead of the full matrix. CI's
+`Wall-time` step is gated `continue-on-error: true` so the regression
+stays visible on every push without blocking merges.
+
 ### 3.5 GPU backend (Phase 2.5)
 
 A `Backend` trait in `src/gpu/mod.rs` abstracts the two hot GPU kernels:
