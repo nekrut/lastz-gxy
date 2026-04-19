@@ -21,6 +21,8 @@ PAIRS=(
     "pseudopig1.fa|pseudopig1.fa|pig1 self-alignment"
     "pseudocat.fa|pseudopig1.fa|cat vs pig1 (single-contig cross)"
     "pseudocat.fa|pseudopig.fa|cat vs pig (multi-contig cross)"
+    "sars_cov2.fa|sars_cov2.fa|sars-cov-2 self-alignment"
+    "sars_cov2.fa|sars_cov1.fa|sars-cov-2 vs sars-cov-1 (real virus pair)"
 )
 
 printf '%-40s %6s %6s %6s %8s %8s %8s %6s\n' \

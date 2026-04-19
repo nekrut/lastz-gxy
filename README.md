@@ -73,12 +73,25 @@ parity/scripts/compare.sh parity/corpus/pseudocat.fa parity/corpus/pseudopig.fa
 
 ### Parity matrix (default flags)
 
-| Fixture                             | up | gxy | shared | RECALL | PREC  | bp Δ    | gate |
-|-------------------------------------|---:|----:|-------:|-------:|------:|--------:|:----:|
-| cat self-alignment                  |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
-| pig1 self-alignment                 |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
-| cat vs pig1 (single-contig cross)   |  5 |   6 |      5 |  1.000 | 0.833 | +84.5 % | PASS |
-| cat vs pig (multi-contig cross)     | 14 |  21 |     14 |  1.000 | 0.667 | +41.6 % | PASS |
+| Fixture                                          | up | gxy | shared | RECALL | PREC  | bp Δ    | gate |
+|--------------------------------------------------|---:|----:|-------:|-------:|------:|--------:|:----:|
+| cat self-alignment                               |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
+| pig1 self-alignment                              |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
+| cat vs pig1 (single-contig cross)                |  5 |   6 |      5 |  1.000 | 0.833 | +84.5 % | PASS |
+| cat vs pig (multi-contig cross)                  | 14 |  21 |     14 |  1.000 | 0.667 | +41.6 % | PASS |
+| **sars-cov-2 self-alignment**                    |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
+| **sars-cov-2 vs sars-cov-1 (real virus pair)**   |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
+
+The two bottom rows are real organism genomes from NCBI RefSeq —
+SARS-CoV-2 (NC_045512.2) and SARS-CoV (NC_004718.3), ~30 kbp each, ~80 %
+identity. The cross-species viral pair matches upstream **bit-exactly**
+(precision 1.0 as well as recall 1.0, zero aligned-bp delta). This is
+stronger evidence than the `pseudo*` fixtures allow, because the
+synthetic ones carry paralogs and weak-signal regions that amplify the
+gapped-DP exploration difference between our full-matrix implementation
+and upstream's narrower band. Real divergent genomes don't have that
+property: upstream's DP reaches the same alignments ours does, and the
+shared output is byte-for-byte identical.
 
 **All four fixtures pass the release gate.** The gate — per the revised
 PLAN.md §5 — requires:
