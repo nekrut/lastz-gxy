@@ -109,6 +109,18 @@ Fix: allocate per-row banded slices of size `2 * band_radius + slack`
 `Wall-time` step is gated `continue-on-error: true` so the regression
 stays visible on every push without blocking merges.
 
+**Update (next commit):** band-allocated storage shipped — per-row
+slices of `band_width = 4 * band_radius + 4` cells, indexed by
+`(j - row_lo[i])`. Each row's `row_lo` records the global-j offset.
+Cells outside any row's band are read as `NEG_INF` rather than
+indexed. Per-call allocation drops from ~21 GB to ~870 MB on the
+sars-cov-* fixture; wall time drops 175 s → 20 s (~9× speedup) with
+parity preserved (recall = precision = 1.0 on every fixture).
+Remaining 125× gap vs upstream is per-cell compute (we run 23
+gapped DPs for 1 final record because dedup happens after
+extension, not before). Tracked as a future "HSP-side dedup" or
+"chain-before-extend" opportunity.
+
 ### 3.5 GPU backend (Phase 2.5)
 
 A `Backend` trait in `src/gpu/mod.rs` abstracts the two hot GPU kernels:

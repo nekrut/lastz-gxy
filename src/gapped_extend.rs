@@ -217,12 +217,22 @@ fn extend_one_side(
         m + 1 // unbounded — fall back to full-matrix
     };
 
-    // Full DP matrices of size (n+1) x (m+1). We preallocate once per
-    // extension call — small-footprint extensions (which dominate the
-    // runtime) allocate ≤ a few hundred KiB.
-    let width = m + 1;
-    let stride = width;
-    let size = (n + 1) * width;
+    // Band-allocated DP storage. Each row stores `band_width` cells,
+    // with `row_lo[i]` mapping local index 0 to global j-coordinate
+    // `row_lo[i]`. Allocation is `(n+1) * band_width` instead of the
+    // `(n+1) * (m+1)` full-matrix scheme that came before — for a
+    // 30 kbp x 30 kbp extension that's ~430 MB instead of ~21 GB,
+    // so wall-time on the sars-cov-* fixture drops from ~3 min to
+    // a few seconds (PLAN.md §8 open perf bug, now closed).
+    //
+    // band_width must contain any single row's compute window, which
+    // expands by `band_radius` on each side of the previous row's
+    // alive band. Worst-case width is `2 * band_radius` (alive band)
+    // plus `2 * band_radius` (per-side expansion) plus a small slack
+    // for the off-by-one. For tiny m, fall back to full row width.
+    let band_width = (4 * band_radius + 4).min(m + 1);
+    let mut row_lo: Vec<usize> = vec![0; n + 1];
+    let size = (n + 1) * band_width;
 
     let mut mm = vec![NEG_INF; size];
     let mut xx = vec![NEG_INF; size];
@@ -230,6 +240,27 @@ fn extend_one_side(
     let mut m_from = vec![State::M; size];
     let mut x_from = vec![State::M; size];
     let mut y_from = vec![State::M; size];
+
+    // Translate `(i, j_global)` to a flat index inside the per-row
+    // band. Returns `None` when `j_global` lies outside row i's
+    // allocated slice — the caller treats that as `NEG_INF`.
+    let local_idx = |row_lo: &[usize], i: usize, j: usize| -> Option<usize> {
+        let lo = row_lo[i];
+        if j < lo {
+            return None;
+        }
+        let local = j - lo;
+        if local >= band_width {
+            return None;
+        }
+        Some(i * band_width + local)
+    };
+    let read = |arr: &[i32], row_lo: &[usize], i: usize, j: usize| -> i32 {
+        match local_idx(row_lo, i, j) {
+            Some(idx) => arr[idx],
+            None => NEG_INF,
+        }
+    };
 
     mm[0] = 0;
 
@@ -241,9 +272,17 @@ fn extend_one_side(
     let mut lo: usize = 0;
     let mut hi: usize = 0;
 
+    // Row 0 (the seed cell) lives at local index 0 of row 0's storage.
+    row_lo[0] = 0;
+
     for i in 0..=n {
         let j_lo = lo.saturating_sub(band_radius);
-        let j_hi = (hi + band_radius).min(m);
+        let j_hi = (hi + band_radius).min(m).min(j_lo + band_width - 1);
+
+        // Position row i's storage so j_lo lands at local index 0.
+        // The compute window [j_lo, j_hi] fits inside the band_width-
+        // wide slice by construction.
+        row_lo[i] = j_lo;
 
         for j in j_lo..=j_hi {
             if i == 0 && j == 0 {
@@ -251,18 +290,21 @@ fn extend_one_side(
             }
 
             let mut best = NEG_INF;
+            let here = i * band_width + (j - row_lo[i]);
 
             // X: gap in query (target advances, query does not). Requires i>=1.
             if i >= 1 {
-                let from_m = mm[(i - 1) * stride + j].saturating_sub(gap_open_ext);
-                let from_x = xx[(i - 1) * stride + j].saturating_sub(gap_ext);
+                let prev_m = read(&mm, &row_lo, i - 1, j);
+                let prev_x = read(&xx, &row_lo, i - 1, j);
+                let from_m = prev_m.saturating_sub(gap_open_ext);
+                let from_x = prev_x.saturating_sub(gap_ext);
                 let (v, from) = if from_m >= from_x {
                     (from_m, State::M)
                 } else {
                     (from_x, State::X)
                 };
-                xx[i * stride + j] = v;
-                x_from[i * stride + j] = from;
+                xx[here] = v;
+                x_from[here] = from;
                 if v > best {
                     best = v;
                 }
@@ -270,15 +312,17 @@ fn extend_one_side(
 
             // Y: gap in target (query advances, target does not). Requires j>=1.
             if j >= 1 {
-                let from_m = mm[i * stride + (j - 1)].saturating_sub(gap_open_ext);
-                let from_y = yy[i * stride + (j - 1)].saturating_sub(gap_ext);
+                let prev_m = read(&mm, &row_lo, i, j - 1);
+                let prev_y = read(&yy, &row_lo, i, j - 1);
+                let from_m = prev_m.saturating_sub(gap_open_ext);
+                let from_y = prev_y.saturating_sub(gap_ext);
                 let (v, from) = if from_m >= from_y {
                     (from_m, State::M)
                 } else {
                     (from_y, State::Y)
                 };
-                yy[i * stride + j] = v;
-                y_from[i * stride + j] = from;
+                yy[here] = v;
+                y_from[here] = from;
                 if v > best {
                     best = v;
                 }
@@ -287,9 +331,9 @@ fn extend_one_side(
             // M: match/mismatch column. Requires i>=1 && j>=1.
             if i >= 1 && j >= 1 {
                 let s = pair_score(target[i - 1], query[j - 1], matrix);
-                let from_m = mm[(i - 1) * stride + (j - 1)];
-                let from_x = xx[(i - 1) * stride + (j - 1)];
-                let from_y = yy[(i - 1) * stride + (j - 1)];
+                let from_m = read(&mm, &row_lo, i - 1, j - 1);
+                let from_x = read(&xx, &row_lo, i - 1, j - 1);
+                let from_y = read(&yy, &row_lo, i - 1, j - 1);
                 let (prev, from) = if from_m >= from_x && from_m >= from_y {
                     (from_m, State::M)
                 } else if from_x >= from_y {
@@ -298,8 +342,8 @@ fn extend_one_side(
                     (from_y, State::Y)
                 };
                 let v = prev.saturating_add(s);
-                mm[i * stride + j] = v;
-                m_from[i * stride + j] = from;
+                mm[here] = v;
+                m_from[here] = from;
                 if v > best {
                     best = v;
                 }
@@ -307,10 +351,9 @@ fn extend_one_side(
 
             if best > best_score {
                 best_score = best;
-                // Pick the state that achieved `best` for later traceback.
-                let state = if mm[i * stride + j] == best {
+                let state = if mm[here] == best {
                     State::M
-                } else if xx[i * stride + j] == best {
+                } else if xx[here] == best {
                     State::X
                 } else {
                     State::Y
@@ -322,49 +365,54 @@ fn extend_one_side(
         // X-drop prune: within the cells we actually touched this row,
         // any whose best state is more than `y_drop` below `best_score`
         // is dead. Shrink the band to the surviving window; cells
-        // outside `[j_lo, j_hi]` stayed NEG_INF and don't need touching.
+        // outside `[j_lo, j_hi]` weren't allocated in this row and
+        // don't need touching.
         let threshold = best_score.saturating_sub(y_drop);
-        let mut row_lo = None;
-        let mut row_hi = 0usize;
+        let mut new_lo: Option<usize> = None;
+        let mut new_hi = 0usize;
         for j in j_lo..=j_hi {
-            let alive = mm[i * stride + j].max(xx[i * stride + j]).max(yy[i * stride + j]);
+            let here = i * band_width + (j - row_lo[i]);
+            let alive = mm[here].max(xx[here]).max(yy[here]);
             if alive >= threshold {
-                if row_lo.is_none() {
-                    row_lo = Some(j);
+                if new_lo.is_none() {
+                    new_lo = Some(j);
                 }
-                row_hi = j;
+                new_hi = j;
             } else {
-                // Kill this cell so downstream transitions don't revive it
-                // via saturating arithmetic.
-                mm[i * stride + j] = NEG_INF;
-                xx[i * stride + j] = NEG_INF;
-                yy[i * stride + j] = NEG_INF;
+                // Kill this cell so downstream transitions don't revive
+                // it via saturating arithmetic.
+                mm[here] = NEG_INF;
+                xx[here] = NEG_INF;
+                yy[here] = NEG_INF;
             }
         }
-        if row_lo.is_none() {
+        if new_lo.is_none() {
             // Entire row is dead → extension cannot improve.
             break;
         }
-        lo = row_lo.unwrap();
-        hi = row_hi;
+        lo = new_lo.unwrap();
+        hi = new_hi;
         if lo == hi && i > 0 {
-            let alive = mm[i * stride + lo]
-                .max(xx[i * stride + lo])
-                .max(yy[i * stride + lo]);
+            let here = i * band_width + (lo - row_lo[i]);
+            let alive = mm[here].max(xx[here]).max(yy[here]);
             if alive < best_score.saturating_sub(y_drop) {
                 break;
             }
         }
     }
 
-    // Traceback from best cell.
+    // Traceback from best cell. Cell (i, j) lives at flat index
+    // `i * band_width + (j - row_lo[i])`; the band-allocated layout
+    // doesn't change the traceback algorithm, only how we read the
+    // stored from-state for each cell.
     let (mut i, mut j, mut state) = best_cell;
     let mut script = EditScript::new();
+    let here = |i: usize, j: usize| i * band_width + (j - row_lo[i]);
     while i > 0 || j > 0 {
         match state {
             State::M => {
                 script.push(EditOp::Match, 1);
-                let prev = m_from[i * stride + j];
+                let prev = m_from[here(i, j)];
                 i -= 1;
                 j -= 1;
                 state = prev;
@@ -372,14 +420,14 @@ fn extend_one_side(
             State::X => {
                 // Gap in query: target advanced, query did not.
                 script.push(EditOp::DeleteQuery, 1);
-                let prev = x_from[i * stride + j];
+                let prev = x_from[here(i, j)];
                 i -= 1;
                 state = prev;
             }
             State::Y => {
                 // Gap in target: query advanced, target did not.
                 script.push(EditOp::InsertQuery, 1);
-                let prev = y_from[i * stride + j];
+                let prev = y_from[here(i, j)];
                 j -= 1;
                 state = prev;
             }
