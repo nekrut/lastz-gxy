@@ -17,6 +17,23 @@ use thiserror::Error;
 
 use crate::dna::{decode_base, encode_base};
 
+/// 256-entry unpack table: byte `b` maps to the four 2-bit codes packed
+/// into it, one per output byte of the resulting `[u8; 4]`. Used by the
+/// batch extractors on `PackedSeq` to avoid a scalar shift-and-mask
+/// for every position during SIMD HSP extension.
+const UNPACK_LUT: [[u8; 4]; 256] = {
+    let mut lut = [[0u8; 4]; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        lut[i][0] = (i & 0b11) as u8;
+        lut[i][1] = ((i >> 2) & 0b11) as u8;
+        lut[i][2] = ((i >> 4) & 0b11) as u8;
+        lut[i][3] = ((i >> 6) & 0b11) as u8;
+        i += 1;
+    }
+    lut
+};
+
 /// One sequence from a FASTA: name + packed nucleotide buffer.
 #[derive(Debug, Clone)]
 pub struct Sequence {
@@ -138,6 +155,113 @@ impl PackedSeq {
         for byte in &mut self.mask {
             *byte = 0;
         }
+    }
+
+    /// Batch-extract up to 16 consecutive codes into `out[..n]` starting
+    /// at position `start`. Returns the number of codes written, which
+    /// is `min(16, self.len() - start)` (so the last chunk near EOF
+    /// writes fewer than 16). Positions beyond the sequence are left
+    /// unchanged in `out`.
+    ///
+    /// Uses a precomputed 256-entry LUT keyed by the packed byte so each
+    /// source byte produces 4 output codes in a single table lookup plus
+    /// a `u32::to_le_bytes` memcpy — materially faster than 16 separate
+    /// `code()` calls on realistic HSP extensions. Handles the
+    /// unaligned-start case by shifting the first load left by the
+    /// intra-byte offset. Correctness is proptested vs per-position
+    /// `code()` in `sequences::tests`.
+    #[inline]
+    pub fn codes_batch(&self, start: usize, out: &mut [u8; 16]) -> usize {
+        let n = 16.min(self.len.saturating_sub(start));
+        if n == 0 {
+            return 0;
+        }
+        let off = start & 3;
+        let mut base = start >> 2;
+        let mut filled = 0usize;
+
+        if off != 0 {
+            // Emit the tail of the first byte until we hit a 4-aligned
+            // boundary or run out of codes.
+            let byte = self.codes[base];
+            for k in off..4.min(off + n) {
+                let code = (byte >> (k * 2)) & 0b11;
+                out[filled] = code;
+                filled += 1;
+            }
+            base += 1;
+        }
+
+        // Emit 4 codes at a time via the LUT while at least 4 remain.
+        while filled + 4 <= n {
+            let bytes = UNPACK_LUT[self.codes[base] as usize];
+            out[filled..filled + 4].copy_from_slice(&bytes);
+            base += 1;
+            filled += 4;
+        }
+
+        // Tail: fewer than 4 codes left — use code() to finish.
+        while filled < n {
+            let pos = start + filled;
+            let byte = self.codes[pos >> 2];
+            out[filled] = (byte >> ((pos & 3) * 2)) & 0b11;
+            filled += 1;
+        }
+
+        n
+    }
+
+    /// Batch-extract the validity bits for up to 16 consecutive positions
+    /// starting at `start`. Returns a `u16` with bit `i` set when
+    /// `start + i` is valid and `i < n`, where `n = min(16, len - start)`.
+    /// Bits `>= n` are zero (so invalid positions beyond EOF read as
+    /// invalid, which matches how callers want to treat padding).
+    #[inline]
+    pub fn valid_mask_batch(&self, start: usize) -> u16 {
+        let n = 16.min(self.len.saturating_sub(start));
+        if n == 0 {
+            return 0;
+        }
+        let mut mask = 0u16;
+        let mut i = 0usize;
+        while i < n {
+            let pos = start + i;
+            let byte = self.valid[pos >> 3];
+            // How many contiguous bits from `byte` lie within `start..start+n`?
+            let bit_off = pos & 7;
+            let take = (n - i).min(8 - bit_off);
+            // `take` is in 1..=8; `1u16 << take` avoids the u8 overflow
+            // when `take == 8` (byte-aligned full-byte read).
+            let chunk = ((byte >> bit_off) as u16) & ((1u16 << take) - 1);
+            mask |= chunk << i;
+            i += take;
+        }
+        mask
+    }
+
+    /// Batch-extract the mask bits for up to 16 positions starting at
+    /// `start`. Returns a `u16` in the same shape as `valid_mask_batch`:
+    /// bit `i` set when `start + i` is soft-masked.
+    #[inline]
+    pub fn mask_bits_batch(&self, start: usize) -> u16 {
+        let n = 16.min(self.len.saturating_sub(start));
+        if n == 0 {
+            return 0;
+        }
+        let mut out = 0u16;
+        let mut i = 0usize;
+        while i < n {
+            let pos = start + i;
+            let byte = self.mask[pos >> 3];
+            let bit_off = pos & 7;
+            let take = (n - i).min(8 - bit_off);
+            // `take` is in 1..=8; `1u16 << take` avoids the u8 overflow
+            // when `take == 8` (byte-aligned full-byte read).
+            let chunk = ((byte >> bit_off) as u16) & ((1u16 << take) - 1);
+            out |= chunk << i;
+            i += take;
+        }
+        out
     }
 
     /// Decode back to uppercase ASCII. Invalid positions become `N`.
@@ -361,6 +485,82 @@ mod tests {
         assert!(!sl.is_valid(2)); // 'N' → invalid carried
         assert!(!sl.is_masked(3)); // 'A' → unmasked
         assert!(!sl.is_masked(4)); // 'C' → unmasked
+    }
+
+    fn make_random_packed(len: usize, seed: u64) -> PackedSeq {
+        let mut s = seed;
+        let bytes: Vec<u8> = (0..len)
+            .map(|_| {
+                s = s.wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let r = (s >> 33) & 0x1F;
+                match r {
+                    0 => b'N',   // inject some Ns
+                    1 => b'a',   // and some lowercase
+                    2 => b'g',
+                    _ => b"ACGT"[(r as usize) & 3],
+                }
+            })
+            .collect();
+        PackedSeq::from_ascii(&bytes)
+    }
+
+    #[test]
+    fn codes_batch_matches_per_position_api() {
+        // Build a mixed-case sequence long enough to exercise aligned
+        // and unaligned starts, multiple full LUT loads, and a short
+        // tail.
+        let seq = make_random_packed(200, 42);
+        let mut out = [0u8; 16];
+        for start in 0..(seq.len()) {
+            let n = seq.codes_batch(start, &mut out);
+            let expected_n = 16.min(seq.len() - start);
+            assert_eq!(n, expected_n, "wrong n at start={start}");
+            for i in 0..n {
+                assert_eq!(
+                    out[i],
+                    seq.code(start + i),
+                    "code mismatch at start={start}, i={i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn valid_mask_batch_matches_per_position_api() {
+        let seq = make_random_packed(200, 7);
+        for start in 0..(seq.len()) {
+            let mask = seq.valid_mask_batch(start);
+            let n = 16.min(seq.len() - start);
+            for i in 0..16 {
+                let bit = (mask >> i) & 1 != 0;
+                let expected = i < n && seq.is_valid(start + i);
+                assert_eq!(bit, expected, "validity mismatch at start={start}, i={i}");
+            }
+        }
+    }
+
+    #[test]
+    fn mask_bits_batch_matches_per_position_api() {
+        let seq = make_random_packed(200, 13);
+        for start in 0..(seq.len()) {
+            let mask = seq.mask_bits_batch(start);
+            let n = 16.min(seq.len() - start);
+            for i in 0..16 {
+                let bit = (mask >> i) & 1 != 0;
+                let expected = i < n && seq.is_masked(start + i);
+                assert_eq!(bit, expected, "mask mismatch at start={start}, i={i}");
+            }
+        }
+    }
+
+    #[test]
+    fn batch_extract_past_end_returns_zero() {
+        let seq = PackedSeq::from_ascii(b"ACGT");
+        let mut out = [0u8; 16];
+        assert_eq!(seq.codes_batch(4, &mut out), 0);
+        assert_eq!(seq.valid_mask_batch(4), 0);
+        assert_eq!(seq.mask_bits_batch(4), 0);
     }
 
     #[test]

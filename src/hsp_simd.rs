@@ -157,10 +157,12 @@ unsafe fn extend_side(
     while offset < max_extent {
         let chunk = (max_extent - offset).min(16);
 
-        // Scalar extract up to 16 (code, validity) pairs; positions beyond
-        // `chunk` are padding and marked invalid (their score contributes
-        // `ambig_score` but they'll never be reached because the inner
-        // scalar loop below only walks `chunk` steps).
+        // Batch-extract 16 codes + validity bits in one shot using the
+        // LUT-based path on `PackedSeq`. Forward direction: one call
+        // per side fills `t_codes` / `q_codes` from a 4-byte-aligned
+        // stride in the packed buffer. Backward (left-extension)
+        // direction: still scalar, since the SIMD batch reads in
+        // forward order only — a small price on the less-common side.
         //
         // Bounds invariant: the `max_extent` computation above caps
         // `offset + i < max_extent`, which in turn guarantees the
@@ -171,17 +173,36 @@ unsafe fn extend_side(
         let mut t_codes = [0u8; 16];
         let mut q_codes = [0u8; 16];
         let mut invalid = [0u8; 16];
-        for i in 0..chunk {
-            let t = start_t + direction * (offset + i) as i64;
-            let q = start_q + direction * (offset + i) as i64;
-            debug_assert!(t >= 0 && t < t_len, "SIMD t={t} out of [0, {t_len})");
-            debug_assert!(q >= 0 && q < q_len, "SIMD q={q} out of [0, {q_len})");
-            let ti = t as usize;
-            let qi = q as usize;
-            t_codes[i] = target.code(ti);
-            q_codes[i] = query.code(qi);
-            if !target.is_valid(ti) || !query.is_valid(qi) {
-                invalid[i] = 0xFF;
+
+        if direction > 0 {
+            let t_start_pos = (start_t + offset as i64) as usize;
+            let q_start_pos = (start_q + offset as i64) as usize;
+            target.codes_batch(t_start_pos, &mut t_codes);
+            query.codes_batch(q_start_pos, &mut q_codes);
+            let t_valid = target.valid_mask_batch(t_start_pos);
+            let q_valid = query.valid_mask_batch(q_start_pos);
+            let both_valid = t_valid & q_valid;
+            for i in 0..chunk {
+                if (both_valid >> i) & 1 == 0 {
+                    invalid[i] = 0xFF;
+                }
+            }
+        } else {
+            // Backward direction: positions are walked descending, so
+            // the batch extractor's ascending layout doesn't apply.
+            // Keep the scalar loop here.
+            for i in 0..chunk {
+                let t = start_t + direction * (offset + i) as i64;
+                let q = start_q + direction * (offset + i) as i64;
+                debug_assert!(t >= 0 && t < t_len, "SIMD t={t} out of [0, {t_len})");
+                debug_assert!(q >= 0 && q < q_len, "SIMD q={q} out of [0, {q_len})");
+                let ti = t as usize;
+                let qi = q as usize;
+                t_codes[i] = target.code(ti);
+                q_codes[i] = query.code(qi);
+                if !target.is_valid(ti) || !query.is_valid(qi) {
+                    invalid[i] = 0xFF;
+                }
             }
         }
         for i in chunk..16 {

@@ -48,6 +48,8 @@ fn bench_seed_search(c: &mut Criterion) {
     let params = SearchParams {
         step: 1,
         hsp: HspParams::default(),
+        transitions: 1,
+        entropy_threshold: None,
     };
     c.bench_function("seed_search/1Mbp_vs_100kbp/match12", |b| {
         b.iter(|| {
