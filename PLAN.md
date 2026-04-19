@@ -401,3 +401,80 @@ Unknown/unsupported flags fail fast with
 - ROCm-specific tuning (the wgpu/Vulkan path already runs on AMD).
 - Streaming target from stdin / pipes (useful for progressive alignment
   pipelines).
+
+## 10. Session handoff — what's next
+
+State at the end of the current session (commit `c347022`):
+
+- **Correctness**: 8/8 parity-corpus fixtures PASS the release gate
+  (recall = 1.0 everywhere, bit-exact scores on shared blocks).
+  Self-alignment and real-organism cross-species pairs
+  (SARS-CoV-1 × SARS-CoV-2, human chrM × chimp chrM) match upstream
+  bit-for-bit on precision as well as recall.
+- **Performance**: wall-time on the 30 kbp SARS-CoV pair went from
+  175 s (session start, pre-band-alloc) to 1.35 s (session end).
+  Upstream runs the same pair in ~0.23 s, so we are ~6× slower —
+  attributable to one thing: the 3-state affine gapped DP is still
+  a scalar row-major scan at ~50 ns/cell.
+- **Infrastructure**: GitHub Actions runs cargo test, the parity
+  matrix, and the chrM real-fixture gate on every push. The
+  wall-time step is informational (`continue-on-error`) until the
+  SIMD DP lands.
+- **Open experiments** that did not pan out and should not be
+  repeated without new information (see §3.4 for details):
+  (a) `+1/row` banded DP growth regressed parity;
+  (b) three-pass M / X / Y split did not auto-vectorise;
+  (c) `-C target-cpu=native` yields ~4 % on the current DP and is
+  not a substitute for intrinsics.
+
+### Ranked next-session work
+
+1. **Farrar-striped SIMD gapped DP** (~400–600 LOC). The single
+   biggest remaining lever and the headline Phase 3 item. Expected
+   ~3–4× on the inner DP loop, which would bring the SARS-CoV
+   wall time from 1.35 s to ~0.4 s — within ~2× of upstream on a
+   real workload. Implementation notes:
+   - Live in a new `src/gapped_extend_simd.rs`, gated on
+     `target_arch = "x86_64"` + `is_x86_feature_detected!("avx2")`
+     + scoring-matrix i8-safety (same gating as `hsp_simd.rs`).
+   - 8 × i32 lanes for the M / X vectors; standard Farrar striped
+     layout. Handle the Y (within-row) propagation with the
+     "lazy F" correction pass.
+   - Traceback in scalar, reading from the already-populated
+     striped matrices.
+   - Differential proptest vs the current scalar `extend_one_side`
+     for bit-exact agreement across random `(t, q, matrix,
+     y_drop)` tuples. Protect with the same
+     `hsp::tests::simd_matches_scalar`-style harness already in use.
+   - Once landed, drop `continue-on-error: true` from the CI
+     wall-time step and make regressions fail the build.
+
+2. **GPU backend scaffolding** (wgpu, Phase 2.5). The PLAN has a
+   full design sketch in §3.5. Start with the `Backend` trait and a
+   pass-through `CpuBackend`; add a WGSL seed-lookup kernel and HSP
+   extender next. Gapped DP stays on CPU (mirrors SegAlign's split).
+   Requires a machine with Vulkan / Metal / DX12 access to meaningfully
+   test.
+
+3. **More real-world parity fixtures**. `parity/scripts/fetch-genomes.sh`
+   already supports `chr21` on a host with samtools installed;
+   `REAL_CHR21=1 parity/scripts/matrix-real.sh` runs it. This gives
+   the first mammalian-scale parity number; expect hours of runtime
+   until SIMD DP lands.
+
+4. **Vertical SIMD HSP** (~200 LOC). The current AVX2 HSP extender
+   is 1.22 × scalar because the prefix-sum / x-drop scan inside
+   each 16-column chunk is inherently sequential. Running N HSP
+   extensions in lockstep across SIMD lanes would break that
+   bottleneck. Less structural than the gapped-DP SIMD but touches
+   the driver's HSP loop.
+
+5. **CI status badge + release artefact**. Add the GitHub Actions
+   badge to `README.md` once the first push lands, and publish a
+   static `lastz-gxy` binary via `cargo dist` or a GH Actions
+   release workflow.
+
+6. **Within-target chunking for the `matrix-real.sh` workflow**. The
+   chunking code exists and is tested; wiring it into the
+   `chr21 × chr21` run as `--chunk-size 10000000 --halo 50000`
+   would validate the "single-chrom multi-core" story at scale.
