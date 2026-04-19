@@ -198,6 +198,25 @@ fn extend_one_side(
     let gap_ext = matrix.gap_extend; // cost of extending an existing gap
     let y_drop = params.y_drop;
 
+    // Adaptive band radius. A single Y-state chain (gap in target) can
+    // propagate a score of `best - (gap_open_ext + k*gap_extend)` through
+    // `k` cells before y-drop pruning fires. The band at any row can
+    // therefore grow by up to `(y_drop - gap_open_ext) / gap_extend + 1`
+    // columns in either direction relative to the previous row's band.
+    // We use that as the per-row expansion radius — tight enough that
+    // full-matrix behaviour is preserved (cells outside the band would be
+    // pruned as below-threshold anyway), loose enough to not truncate
+    // any legitimate alignment path.
+    //
+    // A fixed +1 was tried in a previous pass and regressed parity 14→7
+    // on cat × pig; the computed radius is ~300 for HOXD70 defaults.
+    // See PLAN.md §3.4 for the failure-mode writeup.
+    let band_radius: usize = if gap_ext > 0 {
+        ((y_drop.saturating_sub(gap_open_ext) / gap_ext).max(0) + 2) as usize
+    } else {
+        m + 1 // unbounded — fall back to full-matrix
+    };
+
     // Full DP matrices of size (n+1) x (m+1). We preallocate once per
     // extension call — small-footprint extensions (which dominate the
     // runtime) allocate ≤ a few hundred KiB.
@@ -217,13 +236,16 @@ fn extend_one_side(
     let mut best_score: i32 = 0;
     let mut best_cell = (0usize, 0usize, State::M);
 
+    // Band bounds for the previous row. Row 0's band is the single seed
+    // cell (0, 0); subsequent rows expand to [lo - band_radius, hi + band_radius].
+    let mut lo: usize = 0;
+    let mut hi: usize = 0;
+
     for i in 0..=n {
-        // First pass: compute raw DP for every j in this row. The band is
-        // intentionally simple in this scalar impl — we scan j in 0..=m and
-        // x-drop-prune by resetting cells below the threshold to NEG_INF so
-        // they cannot be picked up downstream. Phase 3 switches to a true
-        // banded sweep.
-        for j in 0..=m {
+        let j_lo = lo.saturating_sub(band_radius);
+        let j_hi = (hi + band_radius).min(m);
+
+        for j in j_lo..=j_hi {
             if i == 0 && j == 0 {
                 continue;
             }
@@ -297,13 +319,14 @@ fn extend_one_side(
             }
         }
 
-        // X-drop prune: after filling the row, any j whose best cell is
-        // more than `y_drop` below `best_score` is dead. Shrink lo/hi to
-        // the surviving window.
+        // X-drop prune: within the cells we actually touched this row,
+        // any whose best state is more than `y_drop` below `best_score`
+        // is dead. Shrink the band to the surviving window; cells
+        // outside `[j_lo, j_hi]` stayed NEG_INF and don't need touching.
         let threshold = best_score.saturating_sub(y_drop);
         let mut row_lo = None;
         let mut row_hi = 0usize;
-        for j in 0..=m {
+        for j in j_lo..=j_hi {
             let alive = mm[i * stride + j].max(xx[i * stride + j]).max(yy[i * stride + j]);
             if alive >= threshold {
                 if row_lo.is_none() {
@@ -322,8 +345,8 @@ fn extend_one_side(
             // Entire row is dead → extension cannot improve.
             break;
         }
-        let lo = row_lo.unwrap();
-        let hi = row_hi;
+        lo = row_lo.unwrap();
+        hi = row_hi;
         if lo == hi && i > 0 {
             let alive = mm[i * stride + lo]
                 .max(xx[i * stride + lo])
@@ -462,6 +485,39 @@ mod tests {
         let params = GappedParams { y_drop: 300, gapped_threshold: 500 };
         let aln = extend(anchor, &target, &query, &matrix(), &params).unwrap();
         assert!(aln.t_len >= 24 && aln.t_len <= 32, "t_len={}", aln.t_len);
+    }
+
+    #[test]
+    fn banded_dp_accommodates_large_gap_within_y_drop() {
+        // Construct an alignment with a gap near the start so the band
+        // has to grow fast on the right side to keep up. The gap size is
+        // chosen to fit comfortably within the default band radius
+        // (y_drop/gap_extend ≈ 313); a naïve "+1 per row" band would
+        // truncate it.
+        let core = b"GATTACACATGGCATGTCGAATGCCTAGCATGTCA"; // 35 bp
+        let mut target = core.to_vec();
+        target.extend_from_slice(core); // 70 bp matching run
+        let mut query = Vec::new();
+        query.extend_from_slice(core);
+        // Insert a 50-bp insertion in the query between the two core runs;
+        // fits within band_radius but way beyond any fixed +1/row scheme.
+        query.extend_from_slice(b"AGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAG");
+        query.extend_from_slice(core);
+        let t = PackedSeq::from_ascii(&target);
+        let q = PackedSeq::from_ascii(&query);
+
+        let hsp = Hsp { t_start: 0, q_start: 0, length: 10, score: 0 };
+        let anchor = anchor_from_hsp(hsp, 5);
+        let params = GappedParams { y_drop: 9_400, gapped_threshold: 500 };
+        let aln = extend(anchor, &t, &q, &matrix(), &params).unwrap();
+
+        // Alignment should reach the far side of the insertion — its
+        // target span covers both cores (~70 bp) and the query span is
+        // ~120 bp (70 core + 50 insertion).
+        assert!(aln.t_len >= 60, "t_len = {}; banded DP truncated", aln.t_len);
+        assert!(aln.q_len >= 110, "q_len = {}; banded DP truncated", aln.q_len);
+        // Script must encode the long Y-state run (InsertQuery).
+        assert!(aln.script.to_cigar().contains("I"));
     }
 
     #[test]
