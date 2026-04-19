@@ -11,6 +11,7 @@
 //! ```
 
 pub mod anchor;
+pub mod bit2;
 pub mod chain;
 pub mod cli;
 pub mod diag_hash;

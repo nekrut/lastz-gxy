@@ -3,10 +3,11 @@ use std::io::{stdout, BufWriter, Write};
 
 use clap::Parser;
 
+use lastz_gxy::bit2::load_2bit;
 use lastz_gxy::cli::{build_config, Cli, Format};
 use lastz_gxy::driver::run;
 use lastz_gxy::output::{maf::MafWriter, paf::PafWriter, sam::SamWriter};
-use lastz_gxy::sequences::load_fasta;
+use lastz_gxy::sequences::{load_fasta, Sequence};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -19,8 +20,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let config = build_config(&cli)?;
-    let mut targets = load_fasta(&cli.target)?;
-    let mut queries = load_fasta(&cli.query)?;
+    let mut targets = load_sequences(&cli.target)?;
+    let mut queries = load_sequences(&cli.query)?;
 
     if !config.respect_masking {
         for s in targets.iter_mut().chain(queries.iter_mut()) {
@@ -71,4 +72,19 @@ fn main() -> anyhow::Result<()> {
         records.len()
     );
     Ok(())
+}
+
+/// Dispatch a sequence-file path to the right parser based on its
+/// extension. `.2bit` routes to the UCSC 2bit parser; anything else is
+/// treated as FASTA.
+fn load_sequences(path: &std::path::Path) -> anyhow::Result<Vec<Sequence>> {
+    let is_2bit = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("2bit"));
+    if is_2bit {
+        Ok(load_2bit(path)?)
+    } else {
+        Ok(load_fasta(path)?)
+    }
 }

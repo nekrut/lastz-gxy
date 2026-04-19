@@ -9,6 +9,18 @@ the speed comes from parallelism, cache-friendly data structures, SIMD on the
 CPU hot-path, and a portable GPU compute path for seed+HSP — not from relaxing
 the alignment model.
 
+## Input formats
+
+- **FASTA** (any extension other than `.2bit`): uppercase/lowercase
+  both supported; lowercase is treated as soft-masking per upstream
+  lastz's default.
+- **UCSC 2bit**: pass a file with a `.2bit` extension. Handles both
+  little- and big-endian headers, carries N-block and soft-mask
+  overlays into the aligner. `.2bit` is the reference-sequence format
+  most UCSC / Galaxy pipelines ship, so this unblocks running
+  `lastz-gxy` against stock reference bundles without re-converting
+  to FASTA.
+
 ## Parallelism
 
 - Default: rayon work-stealing over `(target, strand)` pairs — sufficient
