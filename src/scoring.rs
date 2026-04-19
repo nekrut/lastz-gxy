@@ -42,19 +42,18 @@ pub struct ScoringMatrix {
 impl ScoringMatrix {
     /// The upstream HOXD70 default.
     pub fn hoxd70() -> Self {
-        let mut min_off_diag = i32::MAX;
-        for i in 0..4 {
-            for j in 0..4 {
-                if i != j && HOXD70[i][j] < min_off_diag {
-                    min_off_diag = HOXD70[i][j];
-                }
-            }
-        }
         Self {
             sub: HOXD70,
             gap_open: HOXD70_GAP_OPEN,
             gap_extend: HOXD70_GAP_EXTEND,
-            ambig_score: min_off_diag,
+            // Upstream lastz default for an N-vs-anything column is -100
+            // (penalty = -ambiMismatch where ambiMismatch defaults to 100
+            // via blastz heritage; see lastz.c:397 + dna_utilities.c).
+            // Using -125 (min off-diagonal) was slightly harsher and
+            // produced a ~1 bp/column score drift on real-world N-
+            // containing fixtures. Matches upstream bit-exactly on
+            // hg38 chrM self-alignment after this change.
+            ambig_score: -100,
         }
     }
 
@@ -214,20 +213,12 @@ impl ScoringMatrix {
             return Err(ScoringParseError::IncompleteMatrix);
         }
 
-        let mut min_off_diag = i32::MAX;
-        for i in 0..4 {
-            for j in 0..4 {
-                if i != j && sub[i][j] < min_off_diag {
-                    min_off_diag = sub[i][j];
-                }
-            }
-        }
-
         Ok(Self {
             sub,
             gap_open: gap_open.unwrap_or(HOXD70_GAP_OPEN),
             gap_extend: gap_extend.unwrap_or(HOXD70_GAP_EXTEND),
-            ambig_score: min_off_diag,
+            // Match upstream's default N penalty (see `hoxd70()`).
+            ambig_score: -100,
         })
     }
 }

@@ -483,21 +483,22 @@ mod tests {
 
     #[test]
     fn chain_enabled_drops_conflicting_hsp() {
-        // Two non-overlapping HSPs plus a third that conflicts on query.
-        // With --chain the third should be dropped.
-        let t_bytes: Vec<u8> = b"AAAAA"
+        // Two planted homology blocks separated by a stretch of Ns long
+        // enough that x-drop (910) at ambig_score (-100 per N) can't
+        // bridge them. 12 Ns = -1200 penalty, well past the threshold.
+        let t_bytes: Vec<u8> = b"AAAAAAAAAAA"
             .iter()
             .chain(b"GATTACACATGGCATG".iter())
-            .chain(b"AAAAAAAA".iter())
+            .chain(b"AAAAAAAAAAAA".iter()) // 12-bp low-complexity separator
             .chain(b"CTGACCGAATGCATCA".iter())
-            .chain(b"AAAAA".iter())
+            .chain(b"AAAAAAAAAAA".iter())
             .copied()
             .collect();
-        let targets = vec![seq("t", &t_bytes)];
         let queries = vec![seq(
             "q",
-            b"GATTACACATGGCATGNNNNNNNNCTGACCGAATGCATCA",
+            b"GATTACACATGGCATGNNNNNNNNNNNNCTGACCGAATGCATCA", // 12 Ns
         )];
+        let targets = vec![seq("t", &t_bytes)];
         let cfg = Config {
             pattern: SeedPattern::solid(10),
             strand: StrandSpec::Plus,
@@ -509,7 +510,7 @@ mod tests {
         };
         let recs = run(&targets, &queries, &cfg);
         // The chain should cover both distinct HSPs.
-        assert!(recs.len() >= 2);
+        assert!(recs.len() >= 2, "got {recs:#?}");
         // Records are sorted by t_start, so the second one must start after
         // the first one ends (strict increase in chain).
         for pair in recs.windows(2) {

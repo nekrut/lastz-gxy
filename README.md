@@ -71,7 +71,7 @@ parity/scripts/matrix.sh              # sweeps every corpus fixture pair
 parity/scripts/compare.sh parity/corpus/pseudocat.fa parity/corpus/pseudopig.fa
 ```
 
-### Parity matrix (default flags)
+### Parity matrix — synthetic corpus (`parity/scripts/matrix.sh`)
 
 | Fixture                                          | up | gxy | shared | RECALL | PREC  | bp Δ    | gate |
 |--------------------------------------------------|---:|----:|-------:|-------:|------:|--------:|:----:|
@@ -79,8 +79,27 @@ parity/scripts/compare.sh parity/corpus/pseudocat.fa parity/corpus/pseudopig.fa
 | pig1 self-alignment                              |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
 | cat vs pig1 (single-contig cross)                |  5 |   6 |      5 |  1.000 | 0.833 | +84.5 % | PASS |
 | cat vs pig (multi-contig cross)                  | 14 |  21 |     14 |  1.000 | 0.667 | +41.6 % | PASS |
-| **sars-cov-2 self-alignment**                    |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
-| **sars-cov-2 vs sars-cov-1 (real virus pair)**   |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
+| sars-cov-2 self-alignment                        |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
+| sars-cov-2 vs sars-cov-1 (real virus pair)       |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
+
+### Parity matrix — real chromosomes (`parity/scripts/matrix-real.sh`)
+
+Fetched on demand via `parity/scripts/fetch-genomes.sh` (not committed):
+
+| Fixture                                          | up | gxy | shared | RECALL | PREC  | bp Δ    | gate |
+|--------------------------------------------------|---:|----:|-------:|-------:|------:|--------:|:----:|
+| **human chrM vs chimp chrM (real pair)**         |  2 |   2 |      2 |  1.000 | 1.000 |  +0.0 % | PASS |
+| **human chrM self-alignment**                    |  1 |   1 |      1 |  1.000 | 1.000 |  +0.0 % | PASS |
+
+To reproduce:
+
+```bash
+parity/scripts/fetch-genomes.sh chrM      # pulls NC_012920 + NC_001643
+parity/scripts/matrix-real.sh
+# Optionally, for chr21 (~48 Mbp, takes hours; needs samtools):
+parity/scripts/fetch-genomes.sh chr21
+REAL_CHR21=1 parity/scripts/matrix-real.sh
+```
 
 The two bottom rows are real organism genomes from NCBI RefSeq —
 SARS-CoV-2 (NC_045512.2) and SARS-CoV (NC_004718.3), ~30 kbp each, ~80 %

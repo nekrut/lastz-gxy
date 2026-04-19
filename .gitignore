@@ -8,3 +8,7 @@ Cargo.lock
 /parity/upstream/lastz-*/
 /parity/upstream/bin/
 /parity/out/
+# Real-world fixtures downloaded by parity/scripts/fetch-genomes.sh.
+# Too large (~50 MB each for chr21, ~16 KB for chrM) to commit; the
+# script is the source of truth.
+/parity/corpus/real/
